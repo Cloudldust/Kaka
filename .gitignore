@@ -5,6 +5,11 @@
 # Machine-local cargo configuration (target-dir points at this machine's disk).
 /.cargo
 
+# Keep only the app icon in version control; the rest of resources/ is
+# local design material (spec docs, etc.) and must stay out of the repo.
+/resources/*
+!/resources/KAKA.ico
+
 # Generated binaries / debug info.
 *.exe
 *.pdb
