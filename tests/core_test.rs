@@ -462,6 +462,29 @@ fn m3_undo_redo_and_selection() {
     assert_eq!(app.ws.selected_count(), 0);
 }
 
+#[test]
+fn histogram_computes_overflow_ratios() {
+    use kaka::io::histogram::Histogram;
+    // Solid grey: histogram concentrates mid-tones, no clipping.
+    let grey = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 64, |_, _| image::Rgb([128u8, 128u8, 128u8])));
+    let h = Histogram::from_image(&grey);
+    assert_eq!(h.total, 64 * 64);
+    assert!(h.l[128] > 0);
+    assert_eq!(h.black_ratio(), 0.0);
+    assert_eq!(h.white_ratio(), 0.0);
+
+    // Pure black → heavy black clipping, no white clipping.
+    let black = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 64, |_, _| image::Rgb([0u8, 0u8, 0u8])));
+    let h = Histogram::from_image(&black);
+    assert!(h.black_ratio() > 0.9);
+    assert_eq!(h.white_ratio(), 0.0);
+
+    // Pure white → heavy white clipping.
+    let white = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 64, |_, _| image::Rgb([255u8, 255u8, 255u8])));
+    let h = Histogram::from_image(&white);
+    assert!(h.white_ratio() > 0.9);
+}
+
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
 /// preview referenced by JPEGInterchangeFormat/JPEGInterchangeFormatLength.
 /// This exercises the same path a TIFF-based RAW (NEF/ARW/CR2/DNG/ORF…) uses.

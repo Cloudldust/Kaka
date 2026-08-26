@@ -511,10 +511,102 @@ fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
                 Status::Reviewed => ("已阅", theme::KEEP),
             };
             ui.label(RichText::new(format!("状态: {label}")).size(14.0).color(color).strong());
+
+            // Histogram (PRD 7.5) — computed lazily from the preview cache.
+            ui.separator();
+            draw_histogram(app, ui, p.id, p.thumb_hash.as_deref().unwrap_or(""));
         }
         None => {
             ui.label(RichText::new("未选择照片").color(theme::TEXT_WEAK));
         }
+    }
+}
+
+/// Draw the current photo's histogram in the right panel (PRD 7.5).
+fn draw_histogram(app: &mut KakaApp, ui: &mut egui::Ui, photo_id: i64, hash: &str) {
+    ui.label(RichText::new("直方图").size(12.0).color(theme::TEXT_SECONDARY).strong());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 110.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, theme::PREVIEW_BG);
+    painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+
+    if hash.is_empty() {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "无缓存",
+            egui::FontId::proportional(12.0),
+            theme::TEXT_WEAK,
+        );
+        return;
+    }
+    if !app.state.ensure_histogram(photo_id, hash) {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "预览生成后显示",
+            egui::FontId::proportional(12.0),
+            theme::TEXT_WEAK,
+        );
+        return;
+    }
+    let Some(h) = app.state.histogram_for(photo_id) else {
+        return;
+    };
+    plot_histogram(&painter, rect, h);
+}
+
+/// Overlay 4 polyline curves (R/G/B/L), plus overflow markers at the edges.
+fn plot_histogram(painter: &egui::Painter, rect: egui::Rect, h: &crate::io::histogram::Histogram) {
+    let w = rect.width();
+    let height = rect.height();
+    let channels: [([u32; 256], egui::Color32); 4] = [
+        (h.r, egui::Color32::from_rgb(0xff, 0x55, 0x55)),
+        (h.g, egui::Color32::from_rgb(0x55, 0xe8, 0x55)),
+        (h.b, egui::Color32::from_rgb(0x55, 0x90, 0xff)),
+        (h.l, egui::Color32::from_rgb(0xe0, 0xe0, 0xe0)),
+    ];
+    for (arr, color) in channels {
+        let maxv = arr.iter().copied().max().unwrap_or(1).max(1) as f32;
+        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(256);
+        for (i, &c) in arr.iter().enumerate() {
+            let x = rect.min.x + (i as f32 / 255.0) * w;
+            let f = c as f32 / maxv;
+            let y = rect.max.y - 3.0 - f * (height - 6.0);
+            pts.push(egui::pos2(x, y));
+        }
+        painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
+    }
+
+    // Overflow warnings (PRD 7.5): red ticks on the clipping edges.
+    let warn = 0.03f32;
+    if h.black_ratio() > warn {
+        let bx = rect.min.x + 3.0;
+        painter.add(egui::Shape::line(
+            vec![egui::pos2(bx, rect.min.y + 4.0), egui::pos2(bx, rect.max.y - 4.0)],
+            egui::Stroke::new(2.0, theme::DELETE),
+        ));
+        painter.text(
+            egui::pos2(rect.min.x + 6.0, rect.min.y + 1.0),
+            Align2::LEFT_TOP,
+            "暗部死黑",
+            egui::FontId::proportional(10.0),
+            theme::DELETE,
+        );
+    }
+    if h.white_ratio() > warn {
+        let bx = rect.max.x - 3.0;
+        painter.add(egui::Shape::line(
+            vec![egui::pos2(bx, rect.min.y + 4.0), egui::pos2(bx, rect.max.y - 4.0)],
+            egui::Stroke::new(2.0, theme::DELETE),
+        ));
+        painter.text(
+            egui::pos2(rect.max.x - 6.0, rect.min.y + 1.0),
+            Align2::RIGHT_TOP,
+            "高光溢出",
+            egui::FontId::proportional(10.0),
+            theme::DELETE,
+        );
     }
 }
 

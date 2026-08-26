@@ -96,6 +96,10 @@ pub struct AppState {
     // the workspace switches or the app closes; not persisted.
     pub undo_stack: Vec<HistoryEntry>,
     pub redo_stack: Vec<HistoryEntry>,
+
+    // Per-photo histogram cache (PRD 7.5), keyed by photo id. Cleared on a
+    // folder switch; recomputed lazily from the preview cache.
+    pub histograms: std::collections::HashMap<i64, crate::io::histogram::Histogram>,
 }
 
 /// Outcome of either an add-mode or copy-mode import.
@@ -148,6 +152,7 @@ impl AppState {
             import_result: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            histograms: std::collections::HashMap::new(),
         }
     }
 
@@ -177,6 +182,7 @@ impl AppState {
         if is_switch {
             self.undo_stack.clear();
             self.redo_stack.clear();
+            self.histograms.clear();
         }
         self.folder_loaded = true;
         Ok(())
@@ -393,5 +399,25 @@ impl AppState {
         self.folder_loaded = false;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.histograms.clear();
+    }
+
+    /// Compute (and cache) the histogram for a photo from its preview cache.
+    /// Returns true once a histogram is available. Safe to call every frame.
+    pub fn ensure_histogram(&mut self, photo_id: i64, hash: &str) -> bool {
+        if self.histograms.contains_key(&photo_id) {
+            return true;
+        }
+        if let Some(h) = crate::io::histogram::Histogram::from_preview_cache(hash) {
+            self.histograms.insert(photo_id, h);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Read the cached histogram for a photo (if any).
+    pub fn histogram_for(&self, photo_id: i64) -> Option<&crate::io::histogram::Histogram> {
+        self.histograms.get(&photo_id)
     }
 }
