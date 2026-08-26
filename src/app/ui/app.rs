@@ -73,6 +73,9 @@ pub struct KakaApp {
     pub zoom_offset: egui::Vec2,
     pub zoom_photo_id: Option<i64>,
 
+    // Advanced-filter dialog draft (PRD 7.8), applied only on "应用".
+    pub filter_draft: crate::model::Filter,
+
     // Settings dialog working draft (only applied on "保存").
     pub settings_draft: crate::model::AppConfig,
 
@@ -147,6 +150,7 @@ impl KakaApp {
             zoom_active: false,
             zoom_offset: egui::Vec2::ZERO,
             zoom_photo_id: None,
+            filter_draft: crate::model::Filter::default(),
             settings_draft,
             card: crate::app::card::CardDetector::new(),
             pending_crash,

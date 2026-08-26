@@ -60,6 +60,22 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                     apply_search(app, "");
                 }
 
+                // Advanced filter (PRD 7.8) button.
+                let filter_active = app.state.ws.filter.is_active();
+                let filter_btn_style = if filter_active {
+                    egui::Button::new(
+                        RichText::new("过滤").strong().color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
+                    )
+                    .fill(theme::ACCENT)
+                    .stroke(egui::Stroke::new(1.0, theme::ACCENT))
+                } else {
+                    egui::Button::new(RichText::new("过滤").color(theme::TEXT_SECONDARY))
+                };
+                if ui.add(filter_btn_style).clicked() {
+                    app.filter_draft = app.state.ws.filter.clone();
+                    app.state.show_filter = true;
+                }
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let del = app.state.ws.counts.deleted;
                     let del_text = format!("待删 ({del})");
@@ -225,29 +241,14 @@ fn sort_dropdown(app: &mut KakaApp, ui: &mut egui::Ui) {
         });
 }
 
-/// Apply the simple filename search filter (in-memory over the folder list).
+/// Apply the simple filename search filter (composes with the advanced filter).
 fn apply_search(app: &mut KakaApp, needle: &str) {
-    let folder = app.state.ws.folder_path.clone();
-    if folder.is_empty() {
+    if app.state.ws.folder_path.is_empty() {
         return;
     }
-    let all = match crate::db::photos::list_items_in_folder(&app.state.db, &folder, app.state.ws.sort)
-    {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    if needle.is_empty() {
-        app.state.ws.items = all;
-    } else {
-        let needle = needle.to_lowercase();
-        let filtered: Vec<PhotoListItem> = all
-            .into_iter()
-            .filter(|p| p.original_filename.to_lowercase().contains(&needle))
-            .collect();
-        app.state.ws.items = filtered;
-    }
+    app.state.ws.search = needle.to_string();
     app.state.ws.current_index = 0;
-    let _ = app.state.refresh_counts();
+    let _ = app.state.apply_view();
 }
 
 fn render_status_bar(app: &mut KakaApp, ui: &mut egui::Ui) {

@@ -255,7 +255,93 @@ pub fn list_items_in_folder(
     Ok(out)
 }
 
-/// Total photo count in the workspace matching a folder prefix, plus per-status counts.
+/// List photo list items in a folder matching an advanced filter (PRD 7.8).
+/// SQL conditions are applied for the structured fields; format + missing-file
+/// checks are applied in memory (they need filename/disk inspection).
+pub fn list_items_filtered(
+    db: &Db,
+    folder_prefix: &str,
+    order: SortOrder,
+    filter: &crate::model::Filter,
+) -> anyhow::Result<Vec<PhotoListItem>> {
+    use rusqlite::types::Value;
+
+    let mut sql = String::from("SELECT * FROM photos WHERE folder_path LIKE ?1 || '%'");
+    let mut params: Vec<Value> = vec![folder_prefix.to_string().into()];
+
+    if !filter.statuses.is_empty() {
+        let ph = filter.statuses.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        sql.push_str(&format!(" AND status IN ({ph})"));
+        for s in &filter.statuses {
+            params.push((*s).into());
+        }
+    }
+    for (col, vals) in [("camera_model", &filter.cameras), ("lens_model", &filter.lenses)] {
+        if !vals.is_empty() {
+            let ph = vals.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            sql.push_str(&format!(" AND {col} IN ({ph})"));
+            for v in vals {
+                params.push(v.to_string().into());
+            }
+        }
+    }
+    if let Some(mn) = filter.iso_min {
+        sql.push_str(" AND iso >= ?");
+        params.push(mn.into());
+    }
+    if let Some(mx) = filter.iso_max {
+        sql.push_str(" AND iso <= ?");
+        params.push(mx.into());
+    }
+    if let Some(mn) = filter.focal_min {
+        sql.push_str(" AND focal_length >= ?");
+        params.push(mn.into());
+    }
+    if let Some(mx) = filter.focal_max {
+        sql.push_str(" AND focal_length <= ?");
+        params.push(mx.into());
+    }
+    if let Some(d) = &filter.date_from {
+        sql.push_str(" AND capture_time >= ?");
+        params.push(d.to_string().into());
+    }
+    if let Some(d) = &filter.date_to {
+        // Inclusive: include the whole end day.
+        sql.push_str(" AND capture_time <= ?");
+        params.push(format!("{d} 23:59:59").into());
+    }
+    if let Some(true) = filter.pair {
+        sql.push_str(" AND pair_group_id IS NOT NULL");
+    }
+    if let Some(false) = filter.pair {
+        sql.push_str(" AND pair_group_id IS NULL");
+    }
+    sql.push_str(&format!(" ORDER BY {}", sort_sql(order)));
+
+    let mut stmt = db.conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(map_list_item(row)?);
+    }
+
+    // In-memory filters: format (by extension) and missing-file (disk check).
+    if !filter.formats.is_empty() {
+        let fmts: Vec<String> = filter.formats.iter().map(|f| f.to_lowercase()).collect();
+        out.retain(|p| {
+            let ext = std::path::Path::new(&p.original_filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            fmts.contains(&ext)
+        });
+    }
+    if let Some(missing) = filter.missing {
+        out.retain(|p| p.is_missing() == missing);
+    }
+    Ok(out)
+}
 #[derive(Debug, Clone, Default)]
 pub struct StatusCounts {
     pub total: i64,

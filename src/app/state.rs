@@ -27,6 +27,8 @@ pub struct Workspace {
     pub selection_anchor: Option<usize>,
     /// Simple filename search filter (empty = no filter).
     pub search: String,
+    /// Advanced filter (PRD 7.8); default is no restriction.
+    pub filter: crate::model::Filter,
     pub counts: StatusCounts,
 }
 
@@ -40,6 +42,7 @@ impl Workspace {
             selection: HashSet::new(),
             selection_anchor: None,
             search: String::new(),
+            filter: crate::model::Filter::default(),
             counts: StatusCounts::default(),
         }
     }
@@ -85,6 +88,7 @@ pub struct AppState {
     pub show_settings: bool,
     pub show_delete_box: bool,
     pub show_crash_recovery: bool,
+    pub show_filter: bool,
     pub crash_state: Option<WorkspaceState>,
 
     // Import progress (background job bridge).
@@ -146,6 +150,7 @@ impl AppState {
             show_settings: false,
             show_delete_box: false,
             show_crash_recovery: false,
+            show_filter: false,
             crash_state: None,
             import_running: false,
             import_progress: ImportProgress::default(),
@@ -164,46 +169,36 @@ impl AppState {
             self.folder_loaded = false;
             return Ok(());
         }
-        // A real folder switch clears the undo/redo stacks (PRD 7.2).
+        // A real folder switch clears undo/redo + histogram caches (PRD 7.2).
         let is_switch = self.ws.folder_path != folder;
-        db::folders::touch_open(&self.db, folder)?;
-        let items = db::photos::list_items_in_folder(&self.db, folder, sort)?;
-        let counts = db::photos::status_counts(&self.db, folder)?;
-        self.ws = Workspace {
-            folder_path: folder.to_string(),
-            sort,
-            items,
-            current_index: 0,
-            selection: HashSet::new(),
-            selection_anchor: None,
-            search: String::new(),
-            counts,
-        };
         if is_switch {
             self.undo_stack.clear();
             self.redo_stack.clear();
             self.histograms.clear();
         }
+        db::folders::touch_open(&self.db, folder)?;
+        self.ws.folder_path = folder.to_string();
+        self.ws.sort = sort;
+        self.ws.current_index = 0;
+        self.ws.selection = HashSet::new();
+        self.ws.selection_anchor = None;
+        if is_switch {
+            self.ws.search = String::new();
+            self.ws.filter = crate::model::Filter::default();
+        }
         self.folder_loaded = true;
+        self.apply_view()?;
         Ok(())
     }
 
-    /// Reload the current workspace preserving selection/sort/search (used on
-    /// sort/filter changes within the same workspace).
+    /// Reload the current workspace preserving selection/sort/search/filter
+    /// (used on sort/filter changes within the same workspace).
     pub fn reload_current(&mut self) -> anyhow::Result<()> {
         if self.ws.folder_path.is_empty() {
             return Ok(());
         }
-        let folder = self.ws.folder_path.clone();
-        let sort = self.ws.sort;
         let current_id = self.ws.current().map(|p| p.id);
-        let search = self.ws.search.clone();
-        let selection = self.ws.selection.clone();
-        let anchor = self.ws.selection_anchor;
-        self.open_workspace(&folder, sort)?;
-        self.ws.search = search;
-        self.ws.selection = selection;
-        self.ws.selection_anchor = anchor;
+        self.apply_view()?;
         // Re-locate the current photo by id (or its nearest predecessor).
         if let Some(id) = current_id {
             if let Some(pos) = self.ws.items.iter().position(|p| p.id == id) {
@@ -212,6 +207,28 @@ impl AppState {
                 self.ws.current_index = 0;
             }
         }
+        Ok(())
+    }
+
+    /// Recompute the visible items from the DB using the current search + filter,
+    /// and refresh the status counts for the visible set.
+    pub fn apply_view(&mut self) -> anyhow::Result<()> {
+        if self.ws.folder_path.is_empty() {
+            return Ok(());
+        }
+        let folder = self.ws.folder_path.clone();
+        let sort = self.ws.sort;
+        let filter = self.ws.filter.clone();
+        let search = self.ws.search.clone().to_lowercase();
+        let mut items = db::photos::list_items_filtered(&self.db, &folder, sort, &filter)?;
+        if !search.is_empty() {
+            items.retain(|p| p.original_filename.to_lowercase().contains(&search));
+        }
+        // Drop selection entries for photos no longer visible (PRD 7.8).
+        let visible: HashSet<i64> = items.iter().map(|p| p.id).collect();
+        self.ws.selection.retain(|id| visible.contains(id));
+        self.ws.items = items;
+        self.refresh_counts()?;
         Ok(())
     }
 
@@ -384,12 +401,18 @@ impl AppState {
         true
     }
 
-    /// Recompute the status counts for the current folder.
+    /// Recompute the status counts for the current visible (filtered) set.
     pub fn refresh_counts(&mut self) -> anyhow::Result<()> {
-        if self.ws.folder_path.is_empty() {
-            return Ok(());
+        let mut c = StatusCounts::default();
+        for p in &self.ws.items {
+            c.total += 1;
+            match p.status {
+                Status::Untreated => c.untreated += 1,
+                Status::Delete => c.deleted += 1,
+                Status::Reviewed => c.reviewed += 1,
+            }
         }
-        self.ws.counts = db::photos::status_counts(&self.db, &self.ws.folder_path)?;
+        self.ws.counts = c;
         Ok(())
     }
 

@@ -485,6 +485,54 @@ fn histogram_computes_overflow_ratios() {
     assert!(h.white_ratio() > 0.9);
 }
 
+#[test]
+fn advanced_filter_status_format_missing() {
+    use kaka::db::photos::list_items_filtered;
+    use kaka::model::Filter;
+
+    let root = temp_root();
+    let db_path = root.join("f.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [10, 20, 30]);
+    make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
+    make_jpeg(&src.join("DSC_0003.JPG"), [70, 80, 90]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+
+    let folder = src.to_string_lossy();
+    let items = db::photos::list_items_in_folder(&db, &folder, kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert_eq!(items.len(), 3);
+
+    // Mark the first one as delete; filter by status.
+    let first = &items[0];
+    db::photos::set_status(&db, first.id, kaka::model::Status::Delete).unwrap();
+    let mut filt = Filter::default();
+    filt.statuses = vec![1];
+    let out = list_items_filtered(&db, &folder, kaka::model::SortOrder::FilenameAsc, &filt).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].id, first.id);
+
+    // Format filter: JPEG matches all, NEF matches none.
+    let mut fmt = Filter::default();
+    fmt.formats = vec!["JPG".into()];
+    assert_eq!(list_items_filtered(&db, &folder, kaka::model::SortOrder::FilenameAsc, &fmt).unwrap().len(), 3);
+    fmt.formats = vec!["NEF".into()];
+    assert_eq!(list_items_filtered(&db, &folder, kaka::model::SortOrder::FilenameAsc, &fmt).unwrap().len(), 0);
+
+    // Missing filter: files exist -> none missing; missing-only -> 0.
+    let mut miss = Filter::default();
+    miss.missing = Some(false);
+    assert_eq!(list_items_filtered(&db, &folder, kaka::model::SortOrder::FilenameAsc, &miss).unwrap().len(), 3);
+    let mut mm = Filter::default();
+    mm.missing = Some(true);
+    assert_eq!(list_items_filtered(&db, &folder, kaka::model::SortOrder::FilenameAsc, &mm).unwrap().len(), 0);
+}
+
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
 /// preview referenced by JPEGInterchangeFormat/JPEGInterchangeFormatLength.
 /// This exercises the same path a TIFF-based RAW (NEF/ARW/CR2/DNG/ORF…) uses.

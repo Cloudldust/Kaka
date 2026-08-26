@@ -4,6 +4,7 @@ use super::app::{KakaApp, ToastKind};
 use super::theme;
 use crate::model::{SortOrder, Status};
 use crate::db;
+use chrono::Datelike;
 use eframe::egui::{self, Align2, RichText};
 use std::sync::atomic::Ordering;
 
@@ -20,6 +21,9 @@ pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
     }
     if app.state.show_settings {
         settings_dialog(app, ctx);
+    }
+    if app.state.show_filter {
+        filter_dialog(app, ctx);
     }
     if app.state.show_delete_box {
         delete_box(app, ctx);
@@ -437,6 +441,240 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             app.toast(ToastKind::Success, "设置已保存");
         }
     }
+}
+
+fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
+    let folder = app.state.ws.folder_path.clone();
+    let cameras = db::photos::distinct_camera_models(&app.state.db, &folder).unwrap_or_default();
+    let lenses = db::photos::distinct_lens_models(&app.state.db, &folder).unwrap_or_default();
+    let formats = common_formats(&app.state.ws.items);
+
+    dim_backdrop(ctx);
+    egui::Window::new("高级过滤")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([620.0, 560.0])
+        .frame(dialog_frame())
+        .show(ctx, |ui| {
+            ui.label(RichText::new("高级过滤（可叠加，条件为 AND 关系）").heading().color(theme::TEXT));
+            ui.add_space(6.0);
+
+            let mut apply = false;
+            let mut clear = false;
+            let mut cancel = false;
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // 状态.
+                section_heading(ui, "状态");
+                ui.horizontal(|ui| {
+                    for (id, label) in [(0i64, "未处理"), (1, "待删"), (2, "已阅")] {
+                        let mut on = app.filter_draft.statuses.contains(&id);
+                        if ui.checkbox(&mut on, label).changed() {
+                            toggle_in(&mut app.filter_draft.statuses, id);
+                        }
+                    }
+                    if ui.button("全部").clicked() {
+                        app.filter_draft.statuses.clear();
+                    }
+                });
+
+                // 相机 / 镜头.
+                section_heading(ui, "相机型号");
+                ui.horizontal_wrapped(|ui| {
+                    if cameras.is_empty() {
+                        ui.label(RichText::new("（无）").color(theme::TEXT_WEAK));
+                    }
+                    for cam in &cameras {
+                        let mut on = app.filter_draft.cameras.contains(cam);
+                        if ui.checkbox(&mut on, cam).changed() {
+                            toggle_str(&mut app.filter_draft.cameras, cam);
+                        }
+                    }
+                });
+                section_heading(ui, "镜头型号");
+                ui.horizontal_wrapped(|ui| {
+                    if lenses.is_empty() {
+                        ui.label(RichText::new("（无）").color(theme::TEXT_WEAK));
+                    }
+                    for lens in &lenses {
+                        let mut on = app.filter_draft.lenses.contains(lens);
+                        if ui.checkbox(&mut on, lens).changed() {
+                            toggle_str(&mut app.filter_draft.lenses, lens);
+                        }
+                    }
+                });
+
+                // ISO / 焦距.
+                section_heading(ui, "ISO 范围");
+                ui.horizontal(|ui| {
+                    let mut mn = app.filter_draft.iso_min.unwrap_or(0);
+                    let mut mx = app.filter_draft.iso_max.unwrap_or(0);
+                    ui.label(RichText::new("min").color(theme::TEXT_WEAK));
+                    if ui.add(egui::DragValue::new(&mut mn).range(0..=102400).speed(50)).changed() {
+                        app.filter_draft.iso_min = Some(mn);
+                    }
+                    ui.label(RichText::new("max").color(theme::TEXT_WEAK));
+                    if ui.add(egui::DragValue::new(&mut mx).range(0..=102400).speed(50)).changed() {
+                        app.filter_draft.iso_max = Some(mx);
+                    }
+                    if ui.button("清除").clicked() {
+                        app.filter_draft.iso_min = None;
+                        app.filter_draft.iso_max = None;
+                    }
+                });
+                section_heading(ui, "焦距范围 (mm)");
+                ui.horizontal(|ui| {
+                    let mut mn = app.filter_draft.focal_min.unwrap_or(0);
+                    let mut mx = app.filter_draft.focal_max.unwrap_or(0);
+                    ui.label(RichText::new("min").color(theme::TEXT_WEAK));
+                    if ui.add(egui::DragValue::new(&mut mn).range(0..=2000).speed(1)).changed() {
+                        app.filter_draft.focal_min = Some(mn);
+                    }
+                    ui.label(RichText::new("max").color(theme::TEXT_WEAK));
+                    if ui.add(egui::DragValue::new(&mut mx).range(0..=2000).speed(1)).changed() {
+                        app.filter_draft.focal_max = Some(mx);
+                    }
+                    if ui.button("清除").clicked() {
+                        app.filter_draft.focal_min = None;
+                        app.filter_draft.focal_max = None;
+                    }
+                });
+
+                // 日期范围.
+                section_heading(ui, "拍摄日期范围");
+                ui.horizontal(|ui| {
+                    let mut df = app.filter_draft.date_from.clone().unwrap_or_default();
+                    let mut dt = app.filter_draft.date_to.clone().unwrap_or_default();
+                    ui.label(RichText::new("从").color(theme::TEXT_WEAK));
+                    if ui.add(egui::TextEdit::singleline(&mut df).hint_text("YYYY-MM-DD").desired_width(110.0)).changed() {
+                        app.filter_draft.date_from = if df.trim().is_empty() { None } else { Some(df.trim().to_string()) };
+                    }
+                    ui.label(RichText::new("到").color(theme::TEXT_WEAK));
+                    if ui.add(egui::TextEdit::singleline(&mut dt).hint_text("YYYY-MM-DD").desired_width(110.0)).changed() {
+                        app.filter_draft.date_to = if dt.trim().is_empty() { None } else { Some(dt.trim().to_string()) };
+                    }
+                    quick_date(ui, &mut app.filter_draft);
+                });
+
+                // 文件格式.
+                section_heading(ui, "文件格式");
+                ui.horizontal_wrapped(|ui| {
+                    for f in &formats {
+                        let mut on = app.filter_draft.formats.contains(f);
+                        if ui.checkbox(&mut on, f).changed() {
+                            toggle_str(&mut app.filter_draft.formats, f);
+                        }
+                    }
+                });
+
+                // 是否丢失 / 配对.
+                section_heading(ui, "文件状态");
+                ui.horizontal(|ui| {
+                    let mut missing = app.filter_draft.missing;
+                    radio_opt(ui, &mut missing, None, "全部");
+                    radio_opt(ui, &mut missing, Some(true), "仅丢失");
+                    radio_opt(ui, &mut missing, Some(false), "不包含丢失");
+                    app.filter_draft.missing = missing;
+                });
+                ui.horizontal(|ui| {
+                    let mut pair = app.filter_draft.pair;
+                    radio_opt(ui, &mut pair, None, "全部");
+                    radio_opt(ui, &mut pair, Some(true), "仅配对");
+                    radio_opt(ui, &mut pair, Some(false), "仅单文件");
+                    app.filter_draft.pair = pair;
+                });
+            });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.add(primary_button("应用")).clicked() {
+                    apply = true;
+                }
+                if ui.button("清除过滤").clicked() {
+                    clear = true;
+                }
+                if ui.button("取消").clicked() {
+                    cancel = true;
+                }
+            });
+            if apply {
+                app.state.ws.filter = app.filter_draft.clone();
+                let _ = app.state.reload_current();
+                app.state.show_filter = false;
+            }
+            if clear {
+                app.filter_draft = crate::model::Filter::default();
+                app.state.ws.filter = crate::model::Filter::default();
+                let _ = app.state.reload_current();
+                app.state.show_filter = false;
+                app.toast(ToastKind::Info, "已清除过滤条件");
+            }
+            if cancel {
+                app.state.show_filter = false;
+            }
+        });
+    ctx.request_repaint();
+}
+
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(text).size(13.0).color(theme::ACCENT).strong());
+}
+
+fn toggle_in(vec: &mut Vec<i64>, v: i64) {
+    if let Some(pos) = vec.iter().position(|x| *x == v) {
+        vec.remove(pos);
+    } else {
+        vec.push(v);
+    }
+}
+
+fn toggle_str(vec: &mut Vec<String>, v: &str) {
+    if let Some(pos) = vec.iter().position(|x| x == v) {
+        vec.remove(pos);
+    } else {
+        vec.push(v.to_string());
+    }
+}
+
+fn radio_opt(ui: &mut egui::Ui, target: &mut Option<bool>, v: Option<bool>, label: &str) {
+    ui.radio_value(target, v, label);
+}
+
+fn quick_date(ui: &mut egui::Ui, f: &mut crate::model::Filter) {
+    let today = chrono::Local::now().date_naive();
+    let month_start = chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+    let prev_month_end = month_start - chrono::Duration::days(1);
+    let prev_month_start = chrono::NaiveDate::from_ymd_opt(prev_month_end.year(), prev_month_end.month(), 1)
+        .unwrap_or(prev_month_end);
+    let mut push = |ui: &mut egui::Ui, label: &str, from: chrono::NaiveDate, to: chrono::NaiveDate| {
+        if ui.button(label).clicked() {
+            f.date_from = Some(from.format("%Y-%m-%d").to_string());
+            f.date_to = Some(to.format("%Y-%m-%d").to_string());
+        }
+    };
+    push(ui, "今日", today, today);
+    push(ui, "昨日", today - chrono::Duration::days(1), today - chrono::Duration::days(1));
+    push(ui, "近7天", today - chrono::Duration::days(6), today);
+    push(ui, "本月", month_start, today);
+    push(ui, "上月", prev_month_start, prev_month_end);
+}
+
+fn common_formats(items: &[crate::model::PhotoListItem]) -> Vec<String> {
+    let mut set: Vec<String> = Vec::new();
+    for p in items {
+        if let Some(ext) = std::path::Path::new(&p.original_filename)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
+            let ext = ext.to_uppercase();
+            if !set.contains(&ext) {
+                set.push(ext);
+            }
+        }
+    }
+    set
 }
 
 fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {

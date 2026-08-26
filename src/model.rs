@@ -191,6 +191,50 @@ impl PhotoListItem {
     }
 }
 
+/// Advanced filter conditions (PRD 7.8). All conditions are AND-combined.
+/// Empty enum collections mean "no restriction" for that field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Filter {
+    /// Status ids (0=untreated,1=delete,2=reviewed); empty = all.
+    pub statuses: Vec<i64>,
+    /// Camera model values; empty = all.
+    pub cameras: Vec<String>,
+    /// Lens model values; empty = all.
+    pub lenses: Vec<String>,
+    pub iso_min: Option<i64>,
+    pub iso_max: Option<i64>,
+    pub focal_min: Option<i64>,
+    pub focal_max: Option<i64>,
+    /// Date range (inclusive) as YYYY-MM-DD; None = no bound.
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
+    /// File formats (extensions, uppercased e.g. "NEF"); empty = all.
+    pub formats: Vec<String>,
+    /// None = all; Some(true) = missing files only; Some(false) = existing only.
+    pub missing: Option<bool>,
+    /// None = all; Some(true) = paired RAW+JPG only; Some(false) = single only.
+    pub pair: Option<bool>,
+}
+
+impl Filter {
+    /// True when at least one condition is active.
+    pub fn is_active(&self) -> bool {
+        !self.statuses.is_empty()
+            || !self.cameras.is_empty()
+            || !self.lenses.is_empty()
+            || self.iso_min.is_some()
+            || self.iso_max.is_some()
+            || self.focal_min.is_some()
+            || self.focal_max.is_some()
+            || self.date_from.is_some()
+            || self.date_to.is_some()
+            || !self.formats.is_empty()
+            || self.missing.is_some()
+            || self.pair.is_some()
+    }
+}
+
 /// Settings persisted to %APPDATA%/Kaka/config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
