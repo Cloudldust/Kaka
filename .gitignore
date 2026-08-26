@@ -1,2 +1,18 @@
+# Cargo build output (this project overrides target-dir to a machine-local path
+# via .cargo/config.toml which is NOT committed).
 /target
-/resources/
+
+# Machine-local cargo configuration (target-dir points at this machine's disk).
+/.cargo
+
+# Generated binaries / debug info.
+*.exe
+*.pdb
+
+# IDE / OS junk.
+.vs/
+.vscode/
+.idea/
+*.user
+Thumbs.db
+desktop.ini

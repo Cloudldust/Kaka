@@ -3,4 +3,37 @@ name = "kaka"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:egui", "dep:rfd"]
+
 [dependencies]
+chrono = "0.4.45"
+dirs = "6.0.0"
+eframe = { version = "0.36.1", optional = true }
+egui = { version = "0.36.1", optional = true }
+env_logger = "0.11.11"
+kamadak-exif = "0.6.1"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "ico", "bmp"] }
+log = "0.4.34"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha1 = "0.11.0"
+anyhow = "1.0"
+encoding_rs = "0.8.35"
+toml = "1.1.4"
+rfd = { version = "0.17.2", optional = true }
+fs4 = "1.1.0"
+rawler = "0.7.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
