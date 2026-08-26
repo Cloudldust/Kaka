@@ -366,11 +366,11 @@ fn thumb_widget(
         );
     }
 
-    // Border: current = 3px accent; selected = 2px accent; else 1px border.
+    // Border: current (focus) = 3px accent; selected = 2px blue; else 1px border.
     let stroke = if is_current {
         egui::Stroke::new(3.0, theme::ACCENT)
     } else if is_selected {
-        egui::Stroke::new(2.0, theme::ACCENT)
+        egui::Stroke::new(2.0, theme::BLUE)
     } else {
         egui::Stroke::new(1.0, theme::BORDER)
     };
@@ -443,9 +443,9 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
         if ts.x > 0.0 && ts.y > 0.0 {
             let draw_rect;
             if app.zoom_active {
-                // 100%: 1 image px = 1 screen px; pan with Space+drag (PRD 7.4).
-                let space_down = ui.input(|i| i.key_down(egui::Key::Space));
-                if space_down && resp.dragged() {
+                // 100%: 1 image px = 1 screen px; pan with Ctrl+drag (PRD 7.4).
+                let pan = ui.input(|i| i.modifiers.ctrl);
+                if pan && resp.dragged() {
                     app.zoom_offset += resp.drag_delta();
                 }
                 let mut top_left = rect.center() - ts * 0.5 + app.zoom_offset;
@@ -481,7 +481,7 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                 painter.text(
                     egui::pos2(draw_rect.min.x + 6.0, draw_rect.min.y + 6.0),
                     Align2::LEFT_TOP,
-                    "100%",
+                    "100%  Ctrl+拖拽平移",
                     egui::FontId::proportional(12.0),
                     theme::ACCENT,
                 );

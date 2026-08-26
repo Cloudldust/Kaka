@@ -727,13 +727,14 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
 }
 
 fn confirm_dialog(app: &mut KakaApp, ctx: &egui::Context) {
-    let Some(c) = app.confirm.take() else { return; };
+    let Some(c) = app.confirm.as_ref() else { return; };
     dim_backdrop(ctx);
     let text = c.text.clone();
     let title = c.title.clone();
     let label = c.confirm_label.clone();
     let danger = c.danger;
-    let run = c.on_confirm;
+    let mut confirm_clicked = false;
+    let mut cancel_clicked = false;
     egui::Window::new("确认")
         .collapsible(false)
         .resizable(false)
@@ -756,13 +757,21 @@ fn confirm_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         .stroke(egui::Stroke::new(1.0, theme::ACCENT))
                 };
                 if ui.add(btn).clicked() {
-                    run(app);
+                    confirm_clicked = true;
                 }
                 if ui.button("取消").clicked() {
-                    // do nothing
+                    cancel_clicked = true;
                 }
             });
         });
+    // Consume only on an explicit button press, so the dialog stays up until then.
+    if confirm_clicked {
+        if let Some(c) = app.confirm.take() {
+            (c.on_confirm)(app);
+        }
+    } else if cancel_clicked {
+        app.confirm = None;
+    }
 }
 
 fn render_toasts(app: &mut KakaApp, ctx: &egui::Context) {

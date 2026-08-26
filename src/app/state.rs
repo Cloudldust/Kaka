@@ -382,21 +382,29 @@ impl AppState {
     }
 
     /// Undo the last single status change. Returns true if any step was undone.
+    /// The current focus moves to the affected photo so the revert is visible.
     pub fn undo(&mut self) -> bool {
         let Some(entry) = self.undo_stack.pop() else {
             return false;
         };
         let _ = self.set_status(entry.photo_id, entry.old_status);
+        if let Some(pos) = self.ws.items.iter().position(|p| p.id == entry.photo_id) {
+            self.ws.current_index = pos;
+        }
         self.redo_stack.push(entry);
         true
     }
 
     /// Redo the last undone status change. Returns true if any step was re-applied.
+    /// The current focus moves to the affected photo.
     pub fn redo(&mut self) -> bool {
         let Some(entry) = self.redo_stack.pop() else {
             return false;
         };
         let _ = self.set_status(entry.photo_id, entry.new_status);
+        if let Some(pos) = self.ws.items.iter().position(|p| p.id == entry.photo_id) {
+            self.ws.current_index = pos;
+        }
         self.undo_stack.push(entry);
         true
     }

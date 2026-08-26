@@ -448,13 +448,11 @@ impl KakaApp {
             return;
         }
 
-        // Navigation — right/D/Space next, left/A prev. In 100% zoom, Space is
-        // reserved for panning (PRD 7.4), so it does not advance here.
-        let zoom_active = self.zoom_active;
+        // Navigation — right/D/Space next, left/A prev.
         let next = ctx.input_mut(|i| {
             i.consume_key(Modifiers::NONE, Key::ArrowRight)
                 || i.consume_key(Modifiers::NONE, Key::D)
-                || (!zoom_active && i.consume_key(Modifiers::NONE, Key::Space))
+                || i.consume_key(Modifiers::NONE, Key::Space)
         });
         if next {
             if self.state.step(1) {
