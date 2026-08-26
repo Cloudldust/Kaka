@@ -404,6 +404,64 @@ fn copy_mode_resume_progress_continues_from_base() {
     }
 }
 
+#[test]
+fn m3_undo_redo_and_selection() {
+    use kaka::app::state::AppState;
+    use kaka::model::{AppConfig, Status};
+
+    let root = temp_root();
+    let db_path = root.join("m3.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..4 {
+        make_jpeg(&src.join(format!("DSC_{i:04}.JPG")), [i as u8, 40, 80]);
+    }
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+
+    let mut app = AppState::new(db, AppConfig::default());
+    app.open_workspace(&src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert_eq!(app.ws.items.len(), 4);
+
+    // Single Q on the first photo records history for undo.
+    let first_id = app.ws.items[0].id;
+    assert!(app.set_status_current(Status::Delete, true).unwrap());
+    assert!(app.ws.items[0].status == Status::Delete);
+    assert_eq!(app.undo_stack.len(), 1);
+
+    // Undo reverts it; redo re-applies it.
+    assert!(app.undo());
+    assert!(app.ws.items[0].status == Status::Untreated);
+    assert_eq!(app.redo_stack.len(), 1);
+    assert!(app.redo());
+    assert!(app.ws.items[0].status == Status::Delete);
+
+    // Select via click: plain = single, ctrl = toggle, shift = range.
+    app.select_click(1, false, false); // select photos[1] only, make current
+    assert_eq!(app.ws.selected_count(), 1);
+    assert!(app.ws.selection.contains(&app.ws.items[1].id));
+    app.select_click(2, true, false); // ctrl toggle adds photos[2]
+    assert_eq!(app.ws.selected_count(), 2);
+    app.select_click(3, true, false); // ctrl toggle adds photos[3]
+    assert_eq!(app.ws.selected_count(), 3);
+
+    // Batch apply Reviewed to the selection (not undoable).
+    let n = app.set_status_selected(Status::Reviewed).unwrap();
+    assert_eq!(n, 3);
+    assert_eq!(app.undo_stack.len(), 1, "batch must NOT enter the undo stack");
+    for p in &app.ws.items[1..] {
+        assert_eq!(p.status, Status::Reviewed);
+    }
+
+    // Clear selection.
+    assert!(app.clear_selection());
+    assert_eq!(app.ws.selected_count(), 0);
+}
+
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
 /// preview referenced by JPEGInterchangeFormat/JPEGInterchangeFormatLength.
 /// This exercises the same path a TIFF-based RAW (NEF/ARW/CR2/DNG/ORF…) uses.

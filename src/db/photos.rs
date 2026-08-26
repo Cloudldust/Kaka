@@ -145,15 +145,16 @@ pub fn update_path(db: &Db, id: i64, new_path: &str, folder_path: &str) -> anyho
 }
 
 /// Update a photo's status, setting the corresponding marker timestamp.
-pub fn set_status(db: &Db, id: i64, status: Status) -> anyhow::Result<()> {
-    db.conn.execute(
+/// Returns the number of rows changed (0 if the status was already set).
+pub fn set_status(db: &Db, id: i64, status: Status) -> anyhow::Result<usize> {
+    let n = db.conn.execute(
         "UPDATE photos SET status = ?1,
          marked_delete_time = CASE WHEN ?1 = 1 THEN datetime('now') ELSE NULL END,
          marked_review_time = CASE WHEN ?1 = 2 THEN datetime('now') ELSE NULL END
          WHERE id = ?2",
         params![status.as_i64(), id],
     )?;
-    Ok(())
+    Ok(n)
 }
 
 /// Update the thumbnail hash for a photo.
@@ -320,18 +321,20 @@ fn distinct_column(db: &Db, col: &str, folder_prefix: &str) -> anyhow::Result<Ve
 }
 
 /// Batch set all selected photo ids to a status inside a single transaction.
-pub fn set_status_batch(db: &Db, ids: &[i64], status: Status) -> anyhow::Result<()> {
+/// Returns the number of photos that were actually changed.
+pub fn set_status_batch(db: &Db, ids: &[i64], status: Status) -> anyhow::Result<usize> {
     db.conn.execute("BEGIN IMMEDIATE", [])?;
-    let r = (|| -> anyhow::Result<()> {
+    let r = (|| -> anyhow::Result<usize> {
+        let mut n = 0usize;
         for id in ids {
-            set_status(db, *id, status)?;
+            n += set_status(db, *id, status)?;
         }
-        Ok(())
+        Ok(n)
     })();
     match r {
-        Ok(()) => {
+        Ok(n) => {
             db.conn.execute("COMMIT", [])?;
-            Ok(())
+            Ok(n)
         }
         Err(e) => {
             let _ = db.conn.execute("ROLLBACK", []);

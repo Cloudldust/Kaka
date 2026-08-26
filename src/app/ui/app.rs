@@ -475,9 +475,61 @@ impl KakaApp {
             return;
         }
 
-        // Q / E / U status changes.
+        // Undo / redo (single Q/E/U operations only, PRD 7.2).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Z)) {
+            if self.state.undo() {
+                self.toast(ToastKind::Info, "已撤销");
+                self.needs_save = true;
+            }
+            return;
+        }
+        if ctx.input_mut(|i| {
+            i.consume_key(Modifiers::CTRL, Key::Y)
+                || i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z)
+        }) {
+            if self.state.redo() {
+                self.toast(ToastKind::Info, "已重做");
+                self.needs_save = true;
+            }
+            return;
+        }
+
+        // Select all / deselect (PRD 7.9.1).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::A)) {
+            self.state.select_all(true);
+            self.toast(ToastKind::Info, format!("已全选 {} 张", self.state.ws.selected_count()));
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::A)) {
+            self.state.select_all(false);
+            self.toast(ToastKind::Info, "已取消全选");
+            return;
+        }
+        // Esc: clear the selection first (PRD 7.2; Z-zoom exit handled later in M3).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            if self.state.clear_selection() {
+                self.toast(ToastKind::Info, "已取消选择");
+            }
+            return;
+        }
+
+        // Ctrl+Q / Ctrl+E / Ctrl+U → batch apply to the selection (confirmed).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Q)) {
+            self.apply_batch_status(Status::Delete);
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::E)) {
+            self.apply_batch_status(Status::Reviewed);
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::U)) {
+            self.apply_batch_status(Status::Untreated);
+            return;
+        }
+
+        // Single Q / E / U → current photo (undoable), then auto-advance.
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
-            let changed = self.state.set_status_current(Status::Delete).unwrap_or(false);
+            let changed = self.state.set_status_current(Status::Delete, true).unwrap_or(false);
             self.needs_save = true;
             if changed {
                 let blocked = self.state.step(1);
@@ -488,7 +540,7 @@ impl KakaApp {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::E)) {
-            let changed = self.state.set_status_current(Status::Reviewed).unwrap_or(false);
+            let changed = self.state.set_status_current(Status::Reviewed, true).unwrap_or(false);
             self.needs_save = true;
             if changed {
                 let blocked = self.state.step(1);
@@ -499,7 +551,7 @@ impl KakaApp {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::U)) {
-            let changed = self.state.set_status_current(Status::Untreated).unwrap_or(false);
+            let changed = self.state.set_status_current(Status::Untreated, true).unwrap_or(false);
             self.needs_save = true;
             let _ = changed;
             return;
@@ -516,6 +568,44 @@ impl KakaApp {
         }) {
             self.state.show_import = true;
             return;
+        }
+    }
+
+    /// Batch-apply a status to the current selection (Ctrl+Q/E/U, PRD 7.9.2).
+    /// Confirms first when the setting is enabled; never goes into the undo stack.
+    fn apply_batch_status(&mut self, status: Status) {
+        let n = self.state.ws.selected_count();
+        if n == 0 {
+            self.toast(ToastKind::Warning, "请先选中要批量的照片（Ctrl+单击 / Ctrl+A）");
+            return;
+        }
+        let label = match status {
+            Status::Delete => "待删",
+            Status::Reviewed => "已阅",
+            Status::Untreated => "未处理",
+        };
+        if self.state.config.batch_confirm {
+            let status_copy = status;
+            self.confirm = Some(ConfirmDialog {
+                title: "批量操作".into(),
+                text: format!("将选中的 {n} 张照片标记为「{label}」？此操作不可撤销。"),
+                confirm_label: "确认".into(),
+                danger: status == Status::Delete,
+                on_confirm: Box::new(move |app| {
+                    match app.state.set_status_selected(status_copy) {
+                        Ok(_) => app.toast(ToastKind::Success, format!("已将 {n} 张标记为「{label}」")),
+                        Err(e) => app.toast(ToastKind::Error, format!("批量标记失败：{e}")),
+                    }
+                    app.needs_save = true;
+                }),
+            });
+        } else {
+            let r = self.state.set_status_selected(status);
+            match r {
+                Ok(_) => self.toast(ToastKind::Success, format!("已将 {n} 张标记为「{label}」")),
+                Err(e) => self.toast(ToastKind::Error, format!("批量标记失败：{e}")),
+            }
+            self.needs_save = true;
         }
     }
 

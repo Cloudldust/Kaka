@@ -295,6 +295,8 @@ fn render_thumb_strip(app: &mut KakaApp, ui: &mut egui::Ui) {
     let items_len = app.state.ws.items.len();
     let should_center = app.last_centered_id != current_id;
     let mut clicked = None;
+    // Modifiers for the current frame (Ctrl/Shift for multi-select, PRD 7.9.1).
+    let mods = ui.input(|i| i.modifiers);
 
     egui::ScrollArea::horizontal()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
@@ -325,7 +327,7 @@ fn render_thumb_strip(app: &mut KakaApp, ui: &mut egui::Ui) {
         app.last_centered_id = current_id;
     }
     if let Some(idx) = clicked {
-        app.state.ws.current_index = idx;
+        app.state.select_click(idx, mods.ctrl, mods.shift);
         app.needs_save = true;
         app.last_centered_id = current_id;
     }
