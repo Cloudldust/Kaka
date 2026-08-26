@@ -421,11 +421,18 @@ fn thumb_widget(
 }
 
 fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, theme::PREVIEW_BG);
 
     if let Some(item) = app.state.ws.current().cloned() {
+        // Reset zoom when the current photo changes (anchor is per photo, PRD 7.4).
+        if app.zoom_photo_id != Some(item.id) {
+            app.zoom_active = false;
+            app.zoom_offset = egui::Vec2::ZERO;
+            app.zoom_photo_id = Some(item.id);
+        }
+
         let (tex, needs) = app.textures.preview_for(ui.ctx(), &item);
         if needs {
             let hash = item.thumb_hash.clone().unwrap_or_default();
@@ -433,17 +440,51 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
         }
         let ts = tex.size_vec2();
         if ts.x > 0.0 && ts.y > 0.0 {
-            let margin = 24.0;
-            let avail = egui::vec2(rect.width() - margin * 2.0, rect.height() - margin * 2.0).max(egui::vec2(1.0, 1.0));
-            let scale = (avail.x / ts.x).min(avail.y / ts.y);
-            let size = ts * scale;
-            let draw_rect = egui::Rect::from_center_size(rect.center(), size);
+            let draw_rect;
+            if app.zoom_active {
+                // 100%: 1 image px = 1 screen px; pan with Space+drag (PRD 7.4).
+                let space_down = ui.input(|i| i.key_down(egui::Key::Space));
+                if space_down && resp.dragged() {
+                    app.zoom_offset += resp.drag_delta();
+                }
+                let mut top_left = rect.center() - ts * 0.5 + app.zoom_offset;
+                // Clamp so the image always covers the view when it is larger
+                // than the window; otherwise keep it centered.
+                if ts.x >= rect.width() {
+                    top_left.x = top_left.x.clamp(rect.max.x - ts.x, rect.min.x);
+                } else {
+                    top_left.x = rect.center().x - ts.x * 0.5;
+                }
+                if ts.y >= rect.height() {
+                    top_left.y = top_left.y.clamp(rect.max.y - ts.y, rect.min.y);
+                } else {
+                    top_left.y = rect.center().y - ts.y * 0.5;
+                }
+                draw_rect = egui::Rect::from_min_size(top_left, ts);
+            } else {
+                let margin = 24.0;
+                let avail = egui::vec2(rect.width() - margin * 2.0, rect.height() - margin * 2.0)
+                    .max(egui::vec2(1.0, 1.0));
+                let scale = (avail.x / ts.x).min(avail.y / ts.y);
+                let size = ts * scale;
+                draw_rect = egui::Rect::from_center_size(rect.center(), size);
+            }
             painter.image(
                 tex.id(),
                 draw_rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+
+            if app.zoom_active {
+                painter.text(
+                    egui::pos2(draw_rect.min.x + 6.0, draw_rect.min.y + 6.0),
+                    Align2::LEFT_TOP,
+                    "100%",
+                    egui::FontId::proportional(12.0),
+                    theme::ACCENT,
+                );
+            }
 
             // Status corner badge.
             match item.status {

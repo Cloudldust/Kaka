@@ -68,6 +68,11 @@ pub struct KakaApp {
     /// removable card to the recycle bin after a fully-successful import.
     pub import_clear_card: bool,
 
+    // Zoom (Z-key) view state (PRD 7.4 — first cut: 100% render + space-pan).
+    pub zoom_active: bool,
+    pub zoom_offset: egui::Vec2,
+    pub zoom_photo_id: Option<i64>,
+
     // Settings dialog working draft (only applied on "保存").
     pub settings_draft: crate::model::AppConfig,
 
@@ -139,6 +144,9 @@ impl KakaApp {
             import_target: String::new(),
             import_org: crate::app::copy::OrgMode::Structure,
             import_clear_card: false,
+            zoom_active: false,
+            zoom_offset: egui::Vec2::ZERO,
+            zoom_photo_id: None,
             settings_draft,
             card: crate::app::card::CardDetector::new(),
             pending_crash,
@@ -436,11 +444,13 @@ impl KakaApp {
             return;
         }
 
-        // Navigation — right/D/Space next, left/A prev.
+        // Navigation — right/D/Space next, left/A prev. In 100% zoom, Space is
+        // reserved for panning (PRD 7.4), so it does not advance here.
+        let zoom_active = self.zoom_active;
         let next = ctx.input_mut(|i| {
             i.consume_key(Modifiers::NONE, Key::ArrowRight)
                 || i.consume_key(Modifiers::NONE, Key::D)
-                || i.consume_key(Modifiers::NONE, Key::Space)
+                || (!zoom_active && i.consume_key(Modifiers::NONE, Key::Space))
         });
         if next {
             if self.state.step(1) {
@@ -505,11 +515,30 @@ impl KakaApp {
             self.toast(ToastKind::Info, "已取消全选");
             return;
         }
-        // Esc: clear the selection first (PRD 7.2; Z-zoom exit handled later in M3).
+        // Esc: clear selection first, then exit 100% zoom (PRD 7.2 / 7.4).
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             if self.state.clear_selection() {
                 self.toast(ToastKind::Info, "已取消选择");
+            } else if self.zoom_active {
+                self.zoom_active = false;
+                self.zoom_offset = egui::Vec2::ZERO;
             }
+            return;
+        }
+
+        // Z: toggle 100% zoom (PRD 7.4). Ctrl+0 resets to fit.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Z)) {
+            self.zoom_active = !self.zoom_active;
+            self.zoom_offset = egui::Vec2::ZERO;
+            if let Some(p) = self.state.ws.current() {
+                self.zoom_photo_id = Some(p.id);
+            }
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
+            self.zoom_active = false;
+            self.zoom_offset = egui::Vec2::ZERO;
+            self.toast(ToastKind::Info, "已重置为适配窗口");
             return;
         }
 
