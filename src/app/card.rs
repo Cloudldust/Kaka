@@ -75,6 +75,23 @@ impl Drop for CardDetector {
     }
 }
 
+/// True when `path` lies on a removable drive (e.g. an SD card reader mounted
+/// as a drive letter). Used to gate the 清空存储卡 option (PRD 6.3).
+pub fn is_removable_source(path: &std::path::Path) -> bool {
+    let p = match path.to_str() {
+        Some(p) => p,
+        None => return false,
+    };
+    // Only drive-letter absolute paths like "E:\..." or "E:/..." matter.
+    let b = p.as_bytes();
+    if b.len() < 3 || b[1] != b':' {
+        return false;
+    }
+    let letter = (b[0].to_ascii_uppercase()) as char;
+    let root: Vec<u16> = format!("{letter}:\\").encode_utf16().collect();
+    unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) == DRIVE_REMOVABLE }
+}
+
 /// Snapshot the set of removable drive letters currently present.
 fn snapshot() -> HashSet<char> {
     let mut out = HashSet::new();

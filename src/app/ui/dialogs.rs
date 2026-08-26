@@ -195,6 +195,18 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         ui.checkbox(&mut app.import_recursive, "递归扫描子文件夹");
                         ui.checkbox(&mut app.import_dedup, "去重扫描");
                     });
+                    // 清空存储卡 (PRD 6.3): only enabled when the source is a
+                    // removable device; otherwise grayed out and forced off.
+                    let removable =
+                        crate::app::card::is_removable_source(std::path::Path::new(&app.import_path));
+                    if !removable {
+                        app.import_clear_card = false;
+                    }
+                    let checkbox = egui::Checkbox::new(&mut app.import_clear_card, "导入后清空存储卡");
+                    let resp = ui.add_enabled(removable, checkbox).on_hover_text(
+                        "导入完成且全部成功者会移入回收站（非永久删除）。仅当源路径为可移动存储设备时可用。",
+                    );
+                    let _ = resp;
                 }
             }
             ui.separator();
@@ -246,6 +258,7 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                                         org_mode: app.import_org,
                                         recursive: app.import_recursive,
                                         dedup: app.import_dedup,
+                                        clear_card: app.import_clear_card,
                                     };
                                     app.start_copy_import(path.trim(), opts, None);
                                 }

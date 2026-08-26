@@ -64,6 +64,9 @@ pub struct KakaApp {
     pub import_mode: crate::app::state::ImportMode,
     pub import_target: String,
     pub import_org: crate::app::copy::OrgMode,
+    /// 清空存储卡 (PRD 6.7): move successfully-copied source files on the
+    /// removable card to the recycle bin after a fully-successful import.
+    pub import_clear_card: bool,
 
     // Settings dialog working draft (only applied on "保存").
     pub settings_draft: crate::model::AppConfig,
@@ -135,6 +138,7 @@ impl KakaApp {
             import_mode: crate::app::state::ImportMode::Add,
             import_target: String::new(),
             import_org: crate::app::copy::OrgMode::Structure,
+            import_clear_card: false,
             settings_draft,
             card: crate::app::card::CardDetector::new(),
             pending_crash,
@@ -333,6 +337,37 @@ impl KakaApp {
                                 let folder = o.target_dir.clone();
                                 let sort = self.state.ws.sort;
                                 let _ = self.state.open_workspace(&folder, sort);
+                                // 清空存储卡 (PRD 6.7): after a fully-successful
+                                // import, offer to move the copied card files to
+                                // the recycle bin. Destructive → requires confirm.
+                                if o.clear_card && !o.copied_sources.is_empty() {
+                                    let n = o.copied_sources.len();
+                                    let paths: Vec<std::path::PathBuf> = o
+                                        .copied_sources
+                                        .iter()
+                                        .map(std::path::PathBuf::from)
+                                        .collect();
+                                    self.confirm = Some(ConfirmDialog {
+                                        title: "清空存储卡".into(),
+                                        text: format!(
+                                            "导入完成。是否将卡中 {n} 张已成功导入的照片移入回收站？（仅成功导入的文件会被清除，失败/取消的文件保留在卡中）"
+                                        ),
+                                        confirm_label: "移入回收站".into(),
+                                        danger: true,
+                                        on_confirm: Box::new(move |app| {
+                                            match crate::io::recycle::move_to_recycle_bin(&paths) {
+                                                Ok(()) => app.toast(
+                                                    ToastKind::Success,
+                                                    format!("已将 {n} 张源文件移入回收站"),
+                                                ),
+                                                Err(e) => app.toast(
+                                                    ToastKind::Error,
+                                                    format!("清空存储卡失败：{e}"),
+                                                ),
+                                            }
+                                        }),
+                                    });
+                                }
                             }
                         }
                         self.state.import_result = Some(Ok(outcome));
@@ -555,6 +590,7 @@ impl KakaApp {
         let org_code = options.org_mode.code().to_string();
         let recursive = options.recursive;
         let dedup = options.dedup;
+        let clear_card = options.clear_card;
         // Number already finished this import (resume base), or 0 for a fresh run.
         let resume_base = resume_from.as_ref().map(|s| s.done).unwrap_or(0);
         let resume_flag = resume_from.is_some();
@@ -613,6 +649,7 @@ impl KakaApp {
                     org_mode: crate::app::copy::OrgMode::from_code(&org_code),
                     recursive,
                     dedup,
+                    clear_card,
                 };
                 let outcome = crate::app::copy::copy_mode_import(
                     &mut db,

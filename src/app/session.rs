@@ -34,6 +34,9 @@ impl ImportSession {
             org_mode: crate::app::copy::OrgMode::from_code(&self.org_mode),
             recursive: self.recursive,
             dedup: self.dedup,
+            // Resume never re-clears the card; the 清空存储卡 choice only applies
+            // to the initial run.
+            clear_card: false,
         }
     }
 }

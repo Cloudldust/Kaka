@@ -197,6 +197,7 @@ fn copy_mode_flat_conflicts_and_dedup() {
         org_mode: kaka::app::copy::OrgMode::Flat,
         recursive: true,
         dedup: true,
+        clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
@@ -243,6 +244,7 @@ fn copy_mode_structure_preserves_relative_dirs() {
         org_mode: kaka::app::copy::OrgMode::Structure,
         recursive: true,
         dedup: true,
+        clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
@@ -343,6 +345,7 @@ fn copy_mode_date_subfolder() {
         org_mode: kaka::app::copy::OrgMode::Date,
         recursive: true,
         dedup: true,
+        clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
@@ -375,6 +378,7 @@ fn copy_mode_resume_progress_continues_from_base() {
         org_mode: kaka::app::copy::OrgMode::Structure,
         recursive: true,
         dedup: true,
+        clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();

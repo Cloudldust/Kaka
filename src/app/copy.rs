@@ -53,6 +53,9 @@ pub struct CopyOptions {
     pub org_mode: OrgMode,
     pub recursive: bool,
     pub dedup: bool,
+    /// 清空存储卡 (PRD 6.7): after a fully-successful import, move the copied
+    /// source files on the removable card to the recycle bin. Default off.
+    pub clear_card: bool,
 }
 
 impl Default for CopyOptions {
@@ -62,6 +65,7 @@ impl Default for CopyOptions {
             org_mode: OrgMode::Structure,
             recursive: true,
             dedup: true,
+            clear_card: false,
         }
     }
 }
@@ -76,6 +80,11 @@ pub struct CopyOutcome {
     pub total_size: u64,
     pub target_dir: String,
     pub failures: Vec<String>,
+    /// 清空存储卡: whether the user asked to clear the source card after import.
+    pub clear_card: bool,
+    /// Source paths that were copied AND recorded in the DB — the only files
+    /// eligible to be moved to the recycle bin (PRD 6.7).
+    pub copied_sources: Vec<String>,
 }
 
 /// Progress callback: (phase, current, total, filename) -> continue? Return
@@ -106,6 +115,7 @@ pub fn copy_mode_import(
     let total = items.len();
     let mut outcome = CopyOutcome {
         target_dir: options.target_dir.clone(),
+        clear_card: options.clear_card,
         ..Default::default()
     };
     outcome.scanned = total;
@@ -223,7 +233,15 @@ pub fn copy_mode_import(
                     // them). The DB runs WAL + synchronous=NORMAL, so a single
                     // insert does not pay a per-row fsync.
                     match db::photos::insert_photo(db, &photo) {
-                        Ok(Some(_)) => outcome.copied += 1,
+                        Ok(Some(_)) => {
+                            outcome.copied += 1;
+                            // Remember the source path so 清空存储卡 can move the
+                            // successfully-copied files on the card to the recycle
+                            // bin (PRD 6.7).
+                            outcome
+                                .copied_sources
+                                .push(jobs_arc[idx].item.path.to_string_lossy().into_owned());
+                        }
                         Ok(None) => outcome.skipped_existing += 1,
                         Err(e) => {
                             outcome.failed += 1;
