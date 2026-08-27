@@ -254,6 +254,8 @@ pub struct AppConfig {
     pub star_rating: u8,
     pub include_sidecar_export: bool,
     pub export_space_guard: bool,
+    /// User-specified Lightroom Classic install path (empty = auto-detect).
+    pub lr_install_path: String,
 }
 
 impl Default for AppConfig {
@@ -280,6 +282,7 @@ impl Default for AppConfig {
             star_rating: 3,
             include_sidecar_export: true,
             export_space_guard: true,
+            lr_install_path: String::new(),
         }
     }
 }

@@ -434,6 +434,24 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     app.settings_draft.star_rating = r;
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Lightroom 目录").size(13.0).color(theme::TEXT_WEAK));
+                let mut lr = app.settings_draft.lr_install_path.clone();
+                if ui.add(
+                    egui::TextEdit::singleline(&mut lr)
+                        .desired_width(360.0)
+                        .hint_text("Lightroom.exe 路径或所在目录，留空自动检测"),
+                )
+                .changed()
+                {
+                    app.settings_draft.lr_install_path = lr;
+                }
+                if ui.button("浏览…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_file() {
+                        app.settings_draft.lr_install_path = p.to_string_lossy().into_owned();
+                    }
+                }
+            });
             ui.add_space(8.0);
             ui.label(RichText::new("关于").size(13.0).color(theme::ACCENT).strong());
             ui.label(RichText::new(format!("咔咔 v{}（M4）", env!("CARGO_PKG_VERSION"))).size(14.0).color(theme::TEXT));

@@ -273,9 +273,24 @@ fn write_xmp_to(dest: &Path, label: &str, rating: u8, orientation: i64) -> anyho
 
 // ---- Lightroom 联动 (PRD 13) ----
 
-/// Detect a Lightroom Classic install. Checks known install paths first, then the
-/// registry. Returns the path to Lightroom.exe, or None.
-pub fn lr_install_path() -> Option<PathBuf> {
+/// Detect a Lightroom Classic install. If `custom` is a non-empty path the user
+/// configured in settings, prefer it (a directory gets `Lightroom.exe` appended);
+/// otherwise checks known install paths, then the registry. Returns the path to
+/// Lightroom.exe, or None.
+pub fn lr_install_path(custom: &str) -> Option<PathBuf> {
+    if !custom.trim().is_empty() {
+        let p = PathBuf::from(custom.trim());
+        if p.is_file() {
+            return Some(p);
+        }
+        if p.is_dir() {
+            let exe = p.join("Lightroom.exe");
+            if exe.exists() {
+                return Some(exe);
+            }
+        }
+        // Fall through to auto-detect if the custom path is invalid.
+    }
     for p in [
         r"C:\Program Files\Adobe\Adobe Lightroom Classic\Lightroom.exe",
         r"C:\Program Files\Adobe\Lightroom Classic\Lightroom.exe",
