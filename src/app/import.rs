@@ -164,11 +164,10 @@ pub fn add_mode_import(
         match db::photos::insert_photo(db, &photo) {
             Ok(Some(photo_id)) => {
                 outcome.added += 1;
-                // Generate the thumbnail + preview caches on this background
-                // thread so the UI shows them instantly when the workspace opens.
-                if let Some(hash) = &photo.thumb_hash {
-                    let _ = thumbnails::generate_caches(&item.path, hash, 1.0);
-                }
+                // Thumbnail/preview generation is NOT run here: it was the biggest
+                // speed cost (each RAW decode ~1.5s/file). The UI's background
+                // ThumbWorker generates caches after the workspace opens
+                // (app.enqueue_workspace_missing), so import stays fast.
                 let _ = photo_id;
             }
             Ok(None) => outcome.skipped_existing += 1,
