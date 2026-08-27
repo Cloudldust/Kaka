@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
+/// How many of the first imported photos get background thumbnail generation
+/// requested during the import (concurrent, so it never blocks the import loop).
+const ADD_THUMB_PREWARM: usize = 16;
+
 /// Messages sent from the background import thread back to the UI.
 pub enum ImportMsg {
     Progress {
@@ -20,6 +24,13 @@ pub enum ImportMsg {
         done: usize,
         total: usize,
         filename: String,
+    },
+    /// A newly-imported photo that should have its thumbnail generated in the
+    /// background (the UI forwards these to the ThumbWorker with priority).
+    ThumbJob {
+        photo_id: i64,
+        hash: String,
+        path: String,
     },
     Done(Box<Result<crate::app::state::ImportResult, String>>),
 }
@@ -319,6 +330,15 @@ impl KakaApp {
                         total,
                         filename,
                     });
+                }
+                ImportMsg::ThumbJob {
+                    photo_id,
+                    hash,
+                    path,
+                } => {
+                    // Highest-priority thumbnails for the first few imported
+                    // photos — generated concurrently with the rest of the import.
+                    self.thumbs.enqueue(photo_id, &hash, &path);
                 }
                 ImportMsg::Done(res) => {
                     result = Some(*res);
@@ -663,6 +683,10 @@ impl KakaApp {
         std::thread::spawn(move || {
             let auto_cancel = Arc::clone(&cancel);
             let tx_progress = tx.clone();
+            // Request background thumbnail generation for the first N imported
+            // photos so the very first thumbnails are ready when import finishes.
+            let tx_thumb = tx.clone();
+            let mut thumb_sent = 0usize;
             let res = (|| -> Result<import::ImportOutcome, String> {
                 let mut db = Db::open_default().map_err(|e| e.to_string())?;
                 let mut prog = move |phase: &str, done: usize, total: usize, name: &str| -> bool {
@@ -677,12 +701,23 @@ impl KakaApp {
                     });
                     true
                 };
-                import::add_mode_import(
+                let mut on_thumb = move |photo_id: i64, hash: &str, path: &str| {
+                    if thumb_sent < ADD_THUMB_PREWARM {
+                        thumb_sent += 1;
+                        let _ = tx_thumb.send(ImportMsg::ThumbJob {
+                            photo_id,
+                            hash: hash.to_string(),
+                            path: path.to_string(),
+                        });
+                    }
+                };
+                import::add_mode_import_with_thumbs(
                     &mut db,
                     std::path::Path::new(&source),
                     recursive,
                     dedup,
                     &mut prog,
+                    &mut on_thumb,
                 )
                 .map_err(|e| e.to_string())
             })();

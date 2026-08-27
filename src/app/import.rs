@@ -39,12 +39,33 @@ impl ImportOutcome {
 /// three-element matches against the global database (PRD 6.4). Even when
 /// dedup is off, the DB `ON CONFLICT IGNORE` constraint still swallows exact
 /// duplicates, which are then reported as skipped.
+/// Run an add-mode import over `source`. Returns the outcome report.
+///
+/// `recursive` controls subfolder traversal; `dedup` controls whether to skip
+/// three-element matches against the global database (PRD 6.4). Even when
+/// dedup is off, the DB `ON CONFLICT IGNORE` constraint still swallows exact
+/// duplicates, which are then reported as skipped.
 pub fn add_mode_import(
     db: &mut Db,
     source: &Path,
     recursive: bool,
     dedup: bool,
     progress: ProgressFn,
+) -> anyhow::Result<ImportOutcome> {
+    let mut noop = |_id: i64, _h: &str, _p: &str| {};
+    add_mode_import_with_thumbs(db, source, recursive, dedup, progress, &mut noop)
+}
+
+/// Like [`add_mode_import`], but also reports each newly-inserted photo through
+/// `on_thumb` so the caller can request background thumbnail generation while
+/// the import is still running (used to prioritize the first few thumbnails).
+pub fn add_mode_import_with_thumbs(
+    db: &mut Db,
+    source: &Path,
+    recursive: bool,
+    dedup: bool,
+    progress: ProgressFn,
+    on_thumb: &mut dyn FnMut(i64, &str, &str),
 ) -> anyhow::Result<ImportOutcome> {
     if !source.exists() || !source.is_dir() {
         anyhow::bail!("源路径不存在或不是文件夹: {}", source.display());
@@ -164,11 +185,11 @@ pub fn add_mode_import(
         match db::photos::insert_photo(db, &photo) {
             Ok(Some(photo_id)) => {
                 outcome.added += 1;
-                // Thumbnail/preview generation is NOT run here: it was the biggest
-                // speed cost (each RAW decode ~1.5s/file). The UI's background
-                // ThumbWorker generates caches after the workspace opens
-                // (app.enqueue_workspace_missing), so import stays fast.
-                let _ = photo_id;
+                // Tell the caller about this new photo so it can request
+                // background thumbnail generation (the first few, prioritized).
+                if let Some(hash) = &photo.thumb_hash {
+                    on_thumb(photo_id, hash, &item.path.to_string_lossy());
+                }
             }
             Ok(None) => outcome.skipped_existing += 1,
             Err(e) => {
