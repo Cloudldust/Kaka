@@ -89,6 +89,7 @@ pub struct AppState {
     pub show_delete_box: bool,
     pub show_crash_recovery: bool,
     pub show_filter: bool,
+    pub show_export: bool,
     pub crash_state: Option<WorkspaceState>,
 
     // Import progress (background job bridge).
@@ -151,6 +152,7 @@ impl AppState {
             show_delete_box: false,
             show_crash_recovery: false,
             show_filter: false,
+            show_export: false,
             crash_state: None,
             import_running: false,
             import_progress: ImportProgress::default(),

@@ -421,7 +421,7 @@ fn resolve_target_paths(
     Ok(())
 }
 
-fn capture_date(capture_time: &str) -> String {
+pub(crate) fn capture_date(capture_time: &str) -> String {
     if capture_time.len() >= 10 {
         capture_time[..10].to_string()
     } else {
@@ -430,7 +430,7 @@ fn capture_date(capture_time: &str) -> String {
 }
 
 /// Find a same-stem sidecar (.xmp/.dop/.pp3) beside a photo.
-fn find_sidecar(item: &ScanItem) -> Option<PathBuf> {
+pub(crate) fn find_sidecar(item: &ScanItem) -> Option<PathBuf> {
     for ext in ["xmp", "dop", "pp3"] {
         let candidate = item.path.with_extension(ext);
         if candidate.exists() {
@@ -441,7 +441,7 @@ fn find_sidecar(item: &ScanItem) -> Option<PathBuf> {
 }
 
 /// Atomic-ish copy: write to a temp file in the destination dir, then rename.
-fn atomic_copy(src: &Path, dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn atomic_copy(src: &Path, dest: &Path) -> anyhow::Result<()> {
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
         ".{}.kaka.tmp",

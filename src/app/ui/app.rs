@@ -75,6 +75,9 @@ pub struct KakaApp {
     pub import_mode: crate::app::state::ImportMode,
     pub import_target: String,
     pub import_org: crate::app::copy::OrgMode,
+    /// Export dialog defaults (PRD 12).
+    pub export_target: String,
+    pub export_org: crate::app::copy::OrgMode,
     /// 清空存储卡 (PRD 6.7): move successfully-copied source files on the
     /// removable card to the recycle bin after a fully-successful import.
     pub import_clear_card: bool,
@@ -157,6 +160,8 @@ impl KakaApp {
             import_mode: crate::app::state::ImportMode::Add,
             import_target: String::new(),
             import_org: crate::app::copy::OrgMode::Structure,
+            export_target: String::new(),
+            export_org: crate::app::copy::OrgMode::Structure,
             import_clear_card: false,
             zoom_active: false,
             zoom_offset: egui::Vec2::ZERO,
@@ -459,6 +464,8 @@ impl KakaApp {
             || self.state.show_settings
             || self.state.show_delete_box
             || self.state.show_crash_recovery
+            || self.state.show_export
+            || self.state.show_filter
             || self.confirm.is_some()
         {
             return;

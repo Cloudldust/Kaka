@@ -533,6 +533,63 @@ fn advanced_filter_status_format_missing() {
     assert_eq!(list_items_filtered(&db, &folder, kaka::model::SortOrder::FilenameAsc, &mm).unwrap().len(), 0);
 }
 
+#[test]
+fn export_kept_copy_and_file_list() {
+    use kaka::app::copy::OrgMode;
+    use kaka::app::export::{ExportFileFormat, export_file_list, export_kept_copy};
+    use kaka::model::Status;
+
+    let root = temp_root();
+    let db_path = root.join("exp.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [10, 20, 30]);
+    make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
+    make_jpeg(&src.join("DSC_0003.JPG"), [70, 80, 90]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+
+    let folder = src.to_string_lossy();
+    // Mark one photo as Delete so it is excluded from the export.
+    let items = db::photos::list_items_in_folder(&db, &folder, kaka::model::SortOrder::FilenameAsc).unwrap();
+    db::photos::set_status(&db, items[1].id, Status::Delete).unwrap();
+
+    // 12.1: copy kept photos to a flat target dir.
+    let target = root.join("out");
+    let mut xp = |_d: usize, _t: usize| -> bool { true };
+    let out = export_kept_copy(&db, &folder, &target.to_string_lossy(), OrgMode::Flat, false, false, &mut xp).unwrap();
+    assert_eq!(out.total, 2, "only the two kept photos should be exported");
+    assert_eq!(out.copied, 2);
+    assert!(target.join("DSC_0001.JPG").exists());
+    assert!(target.join("DSC_0003.JPG").exists());
+    assert!(!target.join("DSC_0002.JPG").exists(), "the Delete photo must not be copied");
+
+    // 12.2: write a CSV file list of kept photos.
+    let csv = root.join("kept.csv");
+    let n = export_file_list(&db, &folder, &csv.to_string_lossy(), ExportFileFormat::Csv).unwrap();
+    assert_eq!(n, 2);
+    let csv_text = std::fs::read_to_string(&csv).unwrap();
+    assert!(csv_text.contains("DSC_0001.JPG"));
+    assert!(csv_text.contains("DSC_0003.JPG"));
+    assert!(!csv_text.contains("DSC_0002.JPG"));
+    // BOM + header present.
+    assert!(csv_text.starts_with('\u{feff}'));
+    assert!(csv_text.contains("original_filename,current_path,status"));
+
+    // 12.2: TXT list = one absolute path per line.
+    let txt = root.join("kept.txt");
+    let n = export_file_list(&db, &folder, &txt.to_string_lossy(), ExportFileFormat::Txt).unwrap();
+    assert_eq!(n, 2);
+    let txt_text = std::fs::read_to_string(&txt).unwrap();
+    let lines: Vec<&str> = txt_text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].ends_with("DSC_0001.JPG"), "first path line is wrong: {}", lines[0]);
+}
+
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
 /// preview referenced by JPEGInterchangeFormat/JPEGInterchangeFormatLength.
 /// This exercises the same path a TIFF-based RAW (NEF/ARW/CR2/DNG/ORF…) uses.

@@ -103,6 +103,20 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                     if ui.add(import_btn).clicked() {
                         app.state.show_import = true;
                     }
+
+                    // 导出 (PRD 12): only with an open workspace.
+                    let export_btn = egui::Button::new(RichText::new("导出").size(15.0).color(theme::TEXT_SECONDARY));
+                    let resp = ui.add_enabled(has_ws, export_btn);
+                    if resp.clicked() {
+                        if app.export_target.trim().is_empty() {
+                            if !app.state.config.default_target_dir.trim().is_empty() {
+                                app.export_target = app.state.config.default_target_dir.clone();
+                            } else {
+                                app.export_target = app.state.ws.folder_path.clone();
+                            }
+                        }
+                        app.state.show_export = true;
+                    }
                 });
             });
         });

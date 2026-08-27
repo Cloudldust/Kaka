@@ -1,6 +1,6 @@
 //! Modal dialogs: import, crash recovery, settings, delete box, confirm, toasts.
 
-use super::app::{KakaApp, ToastKind};
+use super::app::{ConfirmDialog, KakaApp, ToastKind};
 use super::theme;
 use crate::model::{SortOrder, Status};
 use crate::db;
@@ -24,6 +24,9 @@ pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
     }
     if app.state.show_filter {
         filter_dialog(app, ctx);
+    }
+    if app.state.show_export {
+        export_dialog(app, ctx);
     }
     if app.state.show_delete_box {
         delete_box(app, ctx);
@@ -677,6 +680,130 @@ fn common_formats(items: &[crate::model::PhotoListItem]) -> Vec<String> {
     set
 }
 
+fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
+    let folder = app.state.ws.folder_path.clone();
+    let mut copy_clicked = false;
+    let mut list_clicked = false;
+    let mut xmp_clicked = false;
+
+    dim_backdrop(ctx);
+    egui::Window::new("导出")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([620.0, 460.0])
+        .frame(dialog_frame())
+        .show(ctx, |ui| {
+            ui.label(RichText::new("导出").heading().color(theme::TEXT));
+            ui.label(RichText::new("仅导出「保留」照片（未标记待删），不改动源文件与数据库。")
+                .size(13.0).color(theme::TEXT_SECONDARY));
+            ui.separator();
+
+            // 12.1 复制保留照片到目录.
+            ui.label(RichText::new("方式一：复制保留照片到指定目录").size(14.0).color(theme::ACCENT).strong());
+            ui.horizontal(|ui| {
+                let mut target = app.export_target.clone();
+                if ui.add(egui::TextEdit::singleline(&mut target).desired_width(430.0).hint_text("目标导出目录")).changed() {
+                    app.export_target = target;
+                }
+                if ui.button("浏览…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        app.export_target = p.to_string_lossy().into_owned();
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("组织方式").size(12.0).color(theme::TEXT_WEAK));
+                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Structure, "保持原结构");
+                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Date, "按拍摄日期");
+                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Flat, "全部平铺");
+            });
+            if ui.button("开始导出复制").clicked() {
+                copy_clicked = true;
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("方式二：生成保留照片文件列表").size(14.0).color(theme::ACCENT).strong());
+            if ui.button("导出 .txt / .csv 列表").clicked() {
+                list_clicked = true;
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("方式三：写入 XMP 侧车标记（Kaka:Keep + 星级）").size(14.0).color(theme::ACCENT).strong());
+            if ui.button("写入 XMP 标记").clicked() {
+                xmp_clicked = true;
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("方式四：发送到 Lightroom 经典版").size(14.0).color(theme::ACCENT).strong());
+            ui.label(RichText::new("Lightroom 联动将在本里程碑后续小节接入。").size(12.0).color(theme::TEXT_WEAK));
+
+            ui.separator();
+            if ui.button("关闭").clicked() {
+                app.state.show_export = false;
+            }
+        });
+    ctx.request_repaint();
+
+    if copy_clicked {
+        let target = app.export_target.trim().to_string();
+        if target.is_empty() {
+            app.toast(ToastKind::Warning, "请先选择导出目录");
+        } else {
+            let mut progress = |_d: usize, _t: usize| -> bool { true };
+            match crate::app::export::export_kept_copy(
+                &app.state.db,
+                &folder,
+                &target,
+                app.export_org,
+                true,
+                true,
+                &mut progress,
+            ) {
+                Ok(out) => {
+                    app.toast(
+                        ToastKind::Success,
+                        format!("导出完成：成功 {} 张 / 失败 {} 张", out.copied, out.failed),
+                    );
+                    app.toast(ToastKind::Info, format!("已导出到：{target}"));
+                }
+                Err(e) => app.toast(ToastKind::Error, format!("导出失败：{e}")),
+            }
+            app.state.show_export = false;
+        }
+    }
+    if list_clicked {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("文本列表", &["txt"])
+            .add_filter("CSV", &["csv"])
+            .set_file_name("保留照片列表.csv")
+            .save_file()
+        {
+            let format = if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("txt")).unwrap_or(false) {
+                crate::app::export::ExportFileFormat::Txt
+            } else {
+                crate::app::export::ExportFileFormat::Csv
+            };
+            match crate::app::export::export_file_list(&app.state.db, &folder, &path.to_string_lossy(), format) {
+                Ok(n) => app.toast(ToastKind::Success, format!("已导出 {n} 张列表到：{}", path.display())),
+                Err(e) => app.toast(ToastKind::Error, format!("导出列表失败：{e}")),
+            }
+            app.state.show_export = false;
+        }
+    }
+    if xmp_clicked {
+        let rating = app.state.config.star_rating;
+        match crate::app::export::write_xmp_sidecars(&app.state.db, &folder, rating) {
+            Ok(n) => app.toast(ToastKind::Success, format!("已为 {n} 张保留照片写入 XMP 标记")),
+            Err(e) => app.toast(ToastKind::Error, format!("写入 XMP 失败：{e}")),
+        }
+        app.state.show_export = false;
+    }
+}
+
 fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
     // List all pending-delete photos for the current workspace (status = 1).
     let folder = app.state.ws.folder_path.clone();
@@ -685,6 +812,7 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
     let deleted: Vec<_> = items.into_iter().filter(|p| p.status == Status::Delete).collect();
 
     dim_backdrop(ctx);
+    let mut recycle = false;
     egui::Window::new("待删照片")
         .collapsible(false)
         .resizable(false)
@@ -693,7 +821,8 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
         .frame(dialog_frame())
         .show(ctx, |ui| {
             ui.label(RichText::new(format!("待删照片（{}张）", deleted.len())).heading().color(theme::TEXT));
-            ui.label(RichText::new("M1：仅支持恢复。最终移入回收站将在后续里程碑提供。").size(12.0).color(theme::TEXT_WEAK));
+            ui.label(RichText::new("最终删除会把这些照片文件移入回收站（可从回收站恢复），并清除数据库记录。")
+                .size(12.0).color(theme::TEXT_WEAK));
             ui.separator();
             if deleted.is_empty() {
                 ui.centered_and_justified(|ui| {
@@ -710,20 +839,60 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
             }
             ui.separator();
             let n = deleted.len();
-            if ui
-                .add(egui::Button::new(RichText::new(format!("全部恢复（{n}）")).color(theme::KEEP)))
-                .clicked()
-            {
-                if let Ok(ids) = db::photos::list_ids_in_folder(&app.state.db, &folder, SortOrder::CaptureTimeAsc) {
-                    let _ = db::photos::set_status_batch(&app.state.db, &ids, Status::Untreated);
-                    let _ = app.state.reload_current();
+            ui.horizontal(|ui| {
+                if n > 0 {
+                    // Restore only the marked photos.
+                    if ui
+                        .add(egui::Button::new(RichText::new(format!("全部恢复（{n}）")).color(theme::KEEP)))
+                        .clicked()
+                    {
+                        let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
+                        let _ = db::photos::set_status_batch(&app.state.db, &ids, Status::Untreated);
+                        let _ = app.state.reload_current();
+                        app.state.show_delete_box = false;
+                    }
+                    // Final delete: move files to the recycle bin + clear DB records.
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new(format!("全部移入回收站（{n}）")).strong().color(egui::Color32::WHITE),
+                        ).fill(theme::DELETE).stroke(egui::Stroke::new(1.0, theme::DELETE)))
+                        .clicked()
+                    {
+                        recycle = true;
+                    }
                 }
-                app.state.show_delete_box = false;
-            }
-            if ui.button("关闭").clicked() {
-                app.state.show_delete_box = false;
-            }
+                if ui.button("关闭").clicked() {
+                    app.state.show_delete_box = false;
+                }
+            });
         });
+
+    if recycle {
+        let paths: Vec<std::path::PathBuf> =
+            deleted.iter().map(|p| std::path::PathBuf::from(&p.current_path)).collect();
+        let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
+        let n = paths.len();
+        app.confirm = Some(ConfirmDialog {
+            title: "移入回收站".into(),
+            text: format!("确认将 {n} 张照片及其文件移入回收站？此操作可从回收站恢复，并会清除数据库记录。"),
+            confirm_label: "移入回收站".into(),
+            danger: true,
+            on_confirm: Box::new(move |app| {
+                let ok = crate::io::recycle::move_to_recycle_bin(&paths).is_ok();
+                for id in &ids {
+                    let _ = db::photos::delete_photo(&app.state.db, *id);
+                }
+                let _ = app.state.reload_current();
+                app.state.show_delete_box = false;
+                if ok {
+                    app.toast(ToastKind::Success, format!("已将 {n} 张照片移入回收站"));
+                } else {
+                    app.toast(ToastKind::Error, "部分照片移入回收站失败，请检查回收站状态");
+                }
+                app.needs_save = true;
+            }),
+        });
+    }
 }
 
 fn confirm_dialog(app: &mut KakaApp, ctx: &egui::Context) {
