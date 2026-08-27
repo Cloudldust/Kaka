@@ -412,16 +412,31 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             ui.label(RichText::new("设置").heading().color(theme::TEXT));
             ui.separator();
             ui.label(RichText::new("常规").size(13.0).color(theme::ACCENT).strong());
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut app.settings_draft.auto_open_last_workspace, "自动打开上次工作区");
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut app.settings_draft.dim_reviewed_thumbnails, "缩略图淡化已阅跳过");
-            });
+            ui.checkbox(&mut app.settings_draft.auto_open_last_workspace, "自动打开上次工作区");
+            ui.checkbox(&mut app.settings_draft.auto_detect_card, "自动检测存储卡（SD 热插拔）");
+            ui.checkbox(&mut app.settings_draft.dim_reviewed_thumbnails, "缩略图淡化已阅跳过");
             ui.checkbox(&mut app.settings_draft.batch_confirm, "批量操作二次确认");
+            ui.checkbox(&mut app.settings_draft.show_clipping_warning, "显示高光/暗部溢出提示");
+            ui.checkbox(&mut app.settings_draft.high_dpi_2x, "高 DPI 2x 缩略图");
+            ui.add_space(6.0);
+            ui.label(RichText::new("路径与标记").size(13.0).color(theme::ACCENT).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("默认目标/导出目录").size(13.0).color(theme::TEXT_WEAK));
+                let mut d = app.settings_draft.default_target_dir.clone();
+                if ui.add(egui::TextEdit::singleline(&mut d).desired_width(360.0).hint_text("留空则每询问")).changed() {
+                    app.settings_draft.default_target_dir = d;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("XMP 星级").size(13.0).color(theme::TEXT_WEAK));
+                let mut r = app.settings_draft.star_rating;
+                if ui.add(egui::DragValue::new(&mut r).range(0..=5).speed(1)).changed() {
+                    app.settings_draft.star_rating = r;
+                }
+            });
             ui.add_space(8.0);
             ui.label(RichText::new("关于").size(13.0).color(theme::ACCENT).strong());
-            ui.label(RichText::new("咔咔 v0.1.0（M1 MVP）").size(14.0).color(theme::TEXT));
+            ui.label(RichText::new(format!("咔咔 v{}（M4）", env!("CARGO_PKG_VERSION"))).size(14.0).color(theme::TEXT));
             ui.label(RichText::new("开源 · 无自动更新 · Windows x86_64").size(12.0).color(theme::TEXT_WEAK));
             ui.separator();
             ui.horizontal(|ui| {
@@ -685,6 +700,7 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     let mut copy_clicked = false;
     let mut list_clicked = false;
     let mut xmp_clicked = false;
+    let mut lr_send = false;
 
     dim_backdrop(ctx);
     egui::Window::new("导出")
@@ -739,7 +755,14 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             ui.add_space(8.0);
             ui.separator();
             ui.label(RichText::new("方式四：发送到 Lightroom 经典版").size(14.0).color(theme::ACCENT).strong());
-            ui.label(RichText::new("Lightroom 联动将在本里程碑后续小节接入。").size(12.0).color(theme::TEXT_WEAK));
+            let lr_found = app.lr_path.is_some();
+            let send_btn = egui::Button::new(RichText::new("发送到 Lightroom").color(theme::TEXT));
+            if ui.add_enabled(lr_found, send_btn)
+                .on_hover_text(if lr_found { "将保留照片发送给 Lightroom 导入" } else { "未检测到 Lightroom 经典版" })
+                .clicked()
+            {
+                lr_send = true;
+            }
 
             ui.separator();
             if ui.button("关闭").clicked() {
@@ -801,6 +824,15 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             Err(e) => app.toast(ToastKind::Error, format!("写入 XMP 失败：{e}")),
         }
         app.state.show_export = false;
+    }
+    if lr_send {
+        if let Some(exe) = app.lr_path.clone() {
+            match crate::app::export::send_to_lightroom(&app.state.db, &folder, &exe) {
+                Ok(n) => app.toast(ToastKind::Success, format!("已发送 {n} 张保留照片到 Lightroom")),
+                Err(e) => app.toast(ToastKind::Error, format!("发送到 Lightroom 失败：{e}")),
+            }
+            app.state.show_export = false;
+        }
     }
 }
 

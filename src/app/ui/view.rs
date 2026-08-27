@@ -116,6 +116,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                             }
                         }
                         app.state.show_export = true;
+                        app.lr_path = crate::app::export::lr_install_path();
                     }
                 });
             });

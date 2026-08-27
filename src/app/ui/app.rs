@@ -78,6 +78,8 @@ pub struct KakaApp {
     /// Export dialog defaults (PRD 12).
     pub export_target: String,
     pub export_org: crate::app::copy::OrgMode,
+    /// Detected Lightroom Classic exe path (optional feature, PRD 13).
+    pub lr_path: Option<std::path::PathBuf>,
     /// 清空存储卡 (PRD 6.7): move successfully-copied source files on the
     /// removable card to the recycle bin after a fully-successful import.
     pub import_clear_card: bool,
@@ -162,6 +164,7 @@ impl KakaApp {
             import_org: crate::app::copy::OrgMode::Structure,
             export_target: String::new(),
             export_org: crate::app::copy::OrgMode::Structure,
+            lr_path: None,
             import_clear_card: false,
             zoom_active: false,
             zoom_offset: egui::Vec2::ZERO,

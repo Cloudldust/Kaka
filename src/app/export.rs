@@ -270,3 +270,70 @@ fn write_xmp_to(dest: &Path, label: &str, rating: u8, orientation: i64) -> anyho
     std::fs::write(dest, xml)?;
     Ok(())
 }
+
+// ---- Lightroom 联动 (PRD 13) ----
+
+/// Detect a Lightroom Classic install. Checks known install paths first, then the
+/// registry. Returns the path to Lightroom.exe, or None.
+pub fn lr_install_path() -> Option<PathBuf> {
+    for p in [
+        r"C:\Program Files\Adobe\Adobe Lightroom Classic\Lightroom.exe",
+        r"C:\Program Files\Adobe\Lightroom Classic\Lightroom.exe",
+    ] {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Registry: HKLM\SOFTWARE\Adobe\Lightroom\CurrentVersion\InstallPath.
+    if let Ok(out) = std::process::Command::new("reg")
+        .args(["query", r"HKLM\SOFTWARE\Adobe\Lightroom\CurrentVersion", "/v", "InstallPath"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let Some(eq) = line.find("REG_SZ") {
+                let dir = line[eq..].replace("REG_SZ", "").trim().to_string();
+                if !dir.is_empty() {
+                    let exe = PathBuf::from(dir).join("Lightroom.exe");
+                    if exe.exists() {
+                        return Some(exe);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 12.4 / 13.1: launch Lightroom Classic with every kept photo path as an import
+/// argument, and write a temporary .lrtemplate placeholder file listing the kept
+/// paths. Returns the number of photos sent.
+pub fn send_to_lightroom(db: &Db, folder: &str, lr_exe: &Path) -> anyhow::Result<usize> {
+    let items = db::photos::list_items_in_folder(db, folder, SortOrder::CaptureTimeAsc)?;
+    let kept: Vec<PhotoListItem> = items
+        .into_iter()
+        .filter(|p| p.status != Status::Delete)
+        .collect();
+
+    if kept.is_empty() {
+        anyhow::bail!("工作区没有保留照片");
+    }
+
+    // Write the .lrtemplate placeholder list.
+    let tmp = std::env::temp_dir().join("kaka_lr_import.lrtemplate");
+    let mut list = String::from("\u{feff}"); // BOM
+    for p in &kept {
+        list.push_str(&p.current_path);
+        list.push_str("\r\n");
+    }
+    std::fs::write(&tmp, list)?;
+
+    // Launch LR with each kept path as a command-line import argument.
+    let mut cmd = std::process::Command::new(lr_exe);
+    for p in &kept {
+        cmd.arg(&p.current_path);
+    }
+    cmd.spawn()?;
+    Ok(kept.len())
+}
