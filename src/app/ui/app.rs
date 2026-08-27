@@ -363,12 +363,14 @@ impl KakaApp {
                                 let folder = o.folder.clone();
                                 let sort = self.state.ws.sort;
                                 let _ = self.state.open_workspace(&folder, sort);
+                                self.needs_save = true;
                             }
                             crate::app::state::ImportResult::Copy(o) => {
                                 // Open the target folder as the workspace.
                                 let folder = o.target_dir.clone();
                                 let sort = self.state.ws.sort;
                                 let _ = self.state.open_workspace(&folder, sort);
+                                self.needs_save = true;
                                 // 清空存储卡 (PRD 6.7): after a fully-successful
                                 // import, offer to move the copied card files to
                                 // the recycle bin. Destructive → requires confirm.
@@ -921,6 +923,17 @@ impl KakaApp {
     fn render(&mut self, ui: &mut egui::Ui) {
         view::render(self, ui);
         dialogs::render_dialogs(self, ui.ctx());
+    }
+}
+
+impl Drop for KakaApp {
+    /// Persist the workspace on a normal close so "自动打开上次工作区" works on the
+    /// next launch (a hard kill / crash skips this and is handled by the crash
+    /// marker instead).
+    fn drop(&mut self) {
+        if self.state.folder_loaded {
+            let _ = self.save_workspace();
+        }
     }
 }
 
