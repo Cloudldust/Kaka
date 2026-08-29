@@ -1207,6 +1207,7 @@ impl eframe::App for KakaApp {
         }
         self.maybe_cache_clean();
 
+        self.render(ui);
         self.maybe_autosave();
         self.expire_toasts();
         ctx.request_repaint();

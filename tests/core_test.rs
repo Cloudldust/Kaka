@@ -428,7 +428,6 @@ fn m3_undo_redo_and_selection() {
     assert_eq!(app.ws.items.len(), 4);
 
     // Single Q on the first photo records history for undo.
-    let first_id = app.ws.items[0].id;
     assert!(app.set_status_current(Status::Delete, true).unwrap());
     assert!(app.ws.items[0].status == Status::Delete);
     assert_eq!(app.undo_stack.len(), 1);
