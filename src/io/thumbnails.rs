@@ -86,6 +86,7 @@ pub fn generate_preview(
     let file = std::fs::File::create(dest)?;
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
     enc.encode_image(&small)?;
+    crate::io::cache_index::register_cache_file(dest);
     Ok(true)
 }
 
@@ -223,6 +224,7 @@ pub fn generate_thumbnail(
     let file = std::fs::File::create(dest)?;
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
     enc.encode_image(&thumb)?;
+    crate::io::cache_index::register_cache_file(dest);
     Ok(true)
 }
 
@@ -285,6 +287,7 @@ pub fn generate_caches(src: &Path, hash: &str, dpi_scale: f32) -> anyhow::Result
         let file = std::fs::File::create(&thumb_dest)?;
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, THUMB_QUALITY);
         enc.encode_image(&thumb)?;
+        crate::io::cache_index::register_cache_file(&thumb_dest);
         wrote = true;
     }
 
@@ -305,6 +308,7 @@ pub fn generate_caches(src: &Path, hash: &str, dpi_scale: f32) -> anyhow::Result
         let file = std::fs::File::create(&prev_dest)?;
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, PREVIEW_QUALITY);
         enc.encode_image(&small)?;
+        crate::io::cache_index::register_cache_file(&prev_dest);
         wrote = true;
     }
 

@@ -78,6 +78,7 @@ impl Histogram {
         if !path.exists() {
             return None;
         }
+        crate::io::cache_index::touch_path(&path);
         let img = image::open(&path).ok()?;
         Some(Self::from_image(&img))
     }

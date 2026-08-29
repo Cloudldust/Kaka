@@ -656,6 +656,106 @@ fn embedded_icon_decodes() {
 }
 
 #[test]
+fn cache_index_reconcile_and_cleanup() {
+    use kaka::io::cache_clean::{reconcile, run_cleanup};
+    use kaka::io::cache_index::CacheIndex;
+
+    let root = temp_root();
+    let dir = root.join("cache");
+    std::fs::create_dir_all(dir.join("thumbs")).unwrap();
+    std::fs::create_dir_all(dir.join("previews")).unwrap();
+    std::fs::write(dir.join("thumbs/a.jpg"), vec![0u8; 10]).unwrap();
+    std::fs::write(dir.join("thumbs/b.jpg"), vec![0u8; 20]).unwrap();
+    std::fs::write(dir.join("previews/c.jpg"), vec![0u8; 30]).unwrap();
+
+    let idx = CacheIndex::open(&root.join("cache_index.db")).unwrap();
+    // Register all three via reconcile (as if written before the index existed).
+    assert_eq!(reconcile(&idx, &dir), 3);
+    assert_eq!(reconcile(&idx, &dir), 0, "second reconcile is a no-op");
+    assert_eq!(idx.count().unwrap(), 3);
+    assert_eq!(idx.total_size().unwrap(), 60);
+
+    // Backdate: a created 40 days ago (expired at 30 days), c last accessed
+    // 10 days ago (LRU-oldest), b freshly accessed.
+    let now = chrono::Local::now();
+    let fmt = |d: chrono::Duration| (now - d).format("%Y-%m-%d %H:%M:%S").to_string();
+    idx.record_write_at(
+        "thumbs/a.jpg",
+        "thumb",
+        10,
+        &fmt(chrono::Duration::days(40)),
+        &fmt(chrono::Duration::days(40)),
+    )
+    .unwrap();
+    idx.record_write_at(
+        "thumbs/b.jpg",
+        "thumb",
+        20,
+        &fmt(chrono::Duration::days(1)),
+        &fmt(chrono::Duration::days(0)),
+    )
+    .unwrap();
+    idx.record_write_at(
+        "previews/c.jpg",
+        "preview",
+        30,
+        &fmt(chrono::Duration::days(2)),
+        &fmt(chrono::Duration::days(10)),
+    )
+    .unwrap();
+
+    // 1) Expire pass: a.jpg removed from disk + index.
+    let mut prog = |_d: usize| -> bool { true };
+    let cap = 1024 * 1024 * 1024; // 1 GB — no capacity eviction expected
+    let stats = run_cleanup(&idx, &dir, cap, 30, usize::MAX, &mut prog).unwrap();
+    assert_eq!(stats.expired, 1);
+    assert_eq!(stats.deleted, 1);
+    assert!(!dir.join("thumbs/a.jpg").exists());
+    assert_eq!(idx.total_size().unwrap(), 50);
+
+    // 2) Capacity pass: cap 25 bytes, total 50 > cap → evict LRU-oldest (c)
+    //    until usage drops below the 85% floor (21 bytes).
+    let stats2 = run_cleanup(&idx, &dir, 25, 365, usize::MAX, &mut prog).unwrap();
+    assert_eq!(stats2.deleted, 1);
+    assert!(!dir.join("previews/c.jpg").exists());
+    assert!(dir.join("thumbs/b.jpg").exists(), "most recently accessed entry survives");
+    assert_eq!(idx.total_size().unwrap(), 20);
+}
+
+#[test]
+fn decode_failed_flag_roundtrip() {
+    use kaka::model::Status;
+
+    let root = temp_root();
+    let db_path = root.join("df.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [5, 10, 15]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+
+    let items =
+        db::photos::list_items_in_folder(&db, &src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc).unwrap();
+    let id = items[0].id;
+    assert!(!items[0].decode_failed);
+
+    // Persist the failure (PRD 7.4.3), verify it reads back, then clear it
+    // (the 强制重试 path).
+    db::photos::set_decode_failed(&db, id, true).unwrap();
+    let p = db::photos::get_photo(&db, id).unwrap().unwrap();
+    assert!(p.decode_failed);
+    db::photos::set_decode_failed(&db, id, false).unwrap();
+    let p = db::photos::get_photo(&db, id).unwrap().unwrap();
+    assert!(!p.decode_failed);
+    // Status must be untouched by the flag updates.
+    assert_eq!(p.status, Status::Untreated);
+}
+
+#[test]
 fn import_then_open_workspace_across_connections() {
     // Simulates the real flow: an import thread writes to the DB with its own
     // connection, then the main connection loads the workspace and generates a

@@ -3,15 +3,23 @@
 //! Loading never blocks the UI thread: `texture_for` only reads an already-cached
 //! file; when a cache is missing it returns a placeholder and reports `needs_gen`,
 //! and the caller enqueues a background generation job (see `app::thumbs`).
+//!
+//! The preview map is an LRU with a byte cap (PRD 9.5 内存缓存管理器): at
+//! 1920px a preview texture is ~14 MB RGBA, so an unbounded map would grow GPU
+//! memory without limit across a long session.
 
+use super::super::memcache::MemLru;
 use crate::model::PhotoListItem;
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Byte cap for the preview texture LRU (~70 previews at 1920px RGBA).
+const PREVIEW_TEX_CAP_BYTES: u64 = 1024 * 1024 * 1024;
+
 pub struct TextureCache {
     thumb_map: HashMap<(i64, String), TextureHandle>,
-    preview_map: HashMap<(i64, String), TextureHandle>,
+    preview_map: MemLru<(i64, String), TextureHandle>,
     placeholder: Option<TextureHandle>,
 }
 
@@ -25,7 +33,7 @@ impl TextureCache {
     pub fn new() -> Self {
         TextureCache {
             thumb_map: HashMap::new(),
-            preview_map: HashMap::new(),
+            preview_map: MemLru::new(PREVIEW_TEX_CAP_BYTES),
             placeholder: None,
         }
     }
@@ -81,10 +89,10 @@ impl TextureCache {
         }
         let key = (photo.id, hash.clone());
         if let Some(tex) = self.preview_map.get(&key) {
-            return (tex.clone(), false);
+            return (tex, false);
         }
-        if let Some(tex) = load_preview(ctx, photo, &hash) {
-            self.preview_map.insert(key, tex.clone());
+        if let Some((tex, _bytes)) = load_preview(ctx, photo, &hash) {
+            self.preview_map.insert(key, tex.clone(), preview_tex_bytes(&tex));
             (tex, false)
         } else {
             // No preview cache yet: fall back to the thumbnail texture, and
@@ -99,12 +107,11 @@ impl TextureCache {
         self.thumb_map.remove(&(photo_id, hash.to_string()));
         self.preview_map.remove(&(photo_id, hash.to_string()));
     }
+}
 
-    /// Drop cached entries for photos no longer in the current workspace.
-    pub fn retain(&mut self, valid_ids: &std::collections::HashSet<i64>) {
-        self.thumb_map.retain(|(id, _), _| valid_ids.contains(id));
-        self.preview_map.retain(|(id, _), _| valid_ids.contains(id));
-    }
+fn preview_tex_bytes(tex: &TextureHandle) -> u64 {
+    let s = tex.size_vec2();
+    (s.x as u64) * (s.y as u64) * 4
 }
 
 /// Read a thumbnail from the disk cache. Returns None when the file is missing
@@ -114,30 +121,37 @@ fn load_thumbnail(ctx: &egui::Context, photo: &PhotoListItem, hash: &str) -> Opt
     if !path.exists() {
         return None;
     }
-    decode_to_texture(ctx, &path, format!("thumb-{}-{}", photo.id, hash))
+    crate::io::cache_index::touch_path(&path);
+    decode_to_texture(ctx, &path, format!("thumb-{}-{}", photo.id, hash)).map(|(t, _)| t)
 }
 
-fn load_preview(ctx: &egui::Context, photo: &PhotoListItem, hash: &str) -> Option<TextureHandle> {
+fn load_preview(
+    ctx: &egui::Context,
+    photo: &PhotoListItem,
+    hash: &str,
+) -> Option<(TextureHandle, u64)> {
     let path = crate::io::thumbnails::preview_path(hash);
     if !path.exists() {
         return None;
     }
+    crate::io::cache_index::touch_path(&path);
     decode_to_texture(ctx, &path, format!("preview-{}-{}", photo.id, hash))
 }
 
-fn decode_to_texture(ctx: &egui::Context, path: &Path, tag: String) -> Option<TextureHandle> {
+fn decode_to_texture(ctx: &egui::Context, path: &Path, tag: String) -> Option<(TextureHandle, u64)> {
     let bytes = std::fs::read(path).ok()?;
     let img = image::load_from_memory(&bytes).ok()?;
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     let color = ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
-    Some(ctx.load_texture(tag, color, TextureOptions::LINEAR))
+    let tex = ctx.load_texture(tag, color, TextureOptions::LINEAR);
+    Some((tex, (w as u64) * (h as u64) * 4))
 }
 
 /// Decode an image straight from a source file (best-effort).
 #[allow(dead_code)]
 pub fn load_preview_texture_from_source(ctx: &egui::Context, path: &Path, tag: &str) -> Option<TextureHandle> {
-    decode_to_texture(ctx, path, tag.to_string())
+    decode_to_texture(ctx, path, tag.to_string()).map(|(t, _)| t)
 }
 
 /// Avoid unused-import warnings.

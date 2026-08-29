@@ -411,61 +411,97 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.label(RichText::new("设置").heading().color(theme::TEXT));
             ui.separator();
-            ui.label(RichText::new("常规").size(13.0).color(theme::ACCENT).strong());
-            ui.checkbox(&mut app.settings_draft.auto_open_last_workspace, "自动打开上次工作区");
-            ui.checkbox(&mut app.settings_draft.auto_detect_card, "自动检测存储卡（SD 热插拔）");
-            ui.checkbox(&mut app.settings_draft.dim_reviewed_thumbnails, "缩略图淡化已阅跳过");
-            ui.checkbox(&mut app.settings_draft.batch_confirm, "批量操作二次确认");
-            ui.checkbox(&mut app.settings_draft.show_clipping_warning, "显示高光/暗部溢出提示");
-            ui.checkbox(&mut app.settings_draft.high_dpi_2x, "高 DPI 2x 缩略图");
-            ui.add_space(6.0);
-            ui.label(RichText::new("路径与标记").size(13.0).color(theme::ACCENT).strong());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("默认目标/导出目录").size(13.0).color(theme::TEXT_WEAK));
-                let mut d = app.settings_draft.default_target_dir.clone();
-                if ui.add(egui::TextEdit::singleline(&mut d).desired_width(360.0).hint_text("留空则每询问")).changed() {
-                    app.settings_draft.default_target_dir = d;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("XMP 星级").size(13.0).color(theme::TEXT_WEAK));
-                let mut r = app.settings_draft.star_rating;
-                if ui.add(egui::DragValue::new(&mut r).range(0..=5).speed(1)).changed() {
-                    app.settings_draft.star_rating = r;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Lightroom 目录").size(13.0).color(theme::TEXT_WEAK));
-                let mut lr = app.settings_draft.lr_install_path.clone();
-                if ui.add(
-                    egui::TextEdit::singleline(&mut lr)
-                        .desired_width(360.0)
-                        .hint_text("Lightroom.exe 路径或所在目录，留空自动检测"),
-                )
-                .changed()
-                {
-                    app.settings_draft.lr_install_path = lr;
-                }
-                if ui.button("浏览…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_file() {
-                        app.settings_draft.lr_install_path = p.to_string_lossy().into_owned();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.label(RichText::new("常规").size(13.0).color(theme::ACCENT).strong());
+                ui.checkbox(&mut app.settings_draft.auto_open_last_workspace, "自动打开上次工作区");
+                ui.checkbox(&mut app.settings_draft.auto_detect_card, "自动检测存储卡（SD 热插拔）");
+                ui.checkbox(&mut app.settings_draft.dim_reviewed_thumbnails, "缩略图淡化已阅跳过");
+                ui.checkbox(&mut app.settings_draft.batch_confirm, "批量操作二次确认");
+                ui.checkbox(&mut app.settings_draft.show_clipping_warning, "显示高光/暗部溢出提示");
+                ui.checkbox(&mut app.settings_draft.high_dpi_2x, "高 DPI 2x 缩略图");
+                ui.add_space(6.0);
+                ui.label(RichText::new("路径与标记").size(13.0).color(theme::ACCENT).strong());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("默认目标/导出目录").size(13.0).color(theme::TEXT_WEAK));
+                    let mut d = app.settings_draft.default_target_dir.clone();
+                    if ui.add(egui::TextEdit::singleline(&mut d).desired_width(360.0).hint_text("留空则每询问")).changed() {
+                        app.settings_draft.default_target_dir = d;
                     }
-                }
-            });
-            ui.add_space(8.0);
-            ui.label(RichText::new("关于").size(13.0).color(theme::ACCENT).strong());
-            ui.label(RichText::new(format!("咔咔 v{}（M4）", env!("CARGO_PKG_VERSION"))).size(14.0).color(theme::TEXT));
-            ui.label(RichText::new("开源 · 无自动更新 · Windows x86_64").size(12.0).color(theme::TEXT_WEAK));
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("保存").clicked() {
-                    save = true;
-                    app.state.show_settings = false;
-                }
-                if ui.button("取消").clicked() {
-                    // Discard draft, keep existing config.
-                    app.state.show_settings = false;
-                }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("XMP 星级").size(13.0).color(theme::TEXT_WEAK));
+                    let mut r = app.settings_draft.star_rating;
+                    if ui.add(egui::DragValue::new(&mut r).range(0..=5).speed(1)).changed() {
+                        app.settings_draft.star_rating = r;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Lightroom 目录").size(13.0).color(theme::TEXT_WEAK));
+                    let mut lr = app.settings_draft.lr_install_path.clone();
+                    if ui.add(
+                        egui::TextEdit::singleline(&mut lr)
+                            .desired_width(360.0)
+                            .hint_text("Lightroom.exe 路径或所在目录，留空自动检测"),
+                    )
+                    .changed()
+                    {
+                        app.settings_draft.lr_install_path = lr;
+                    }
+                    if ui.button("浏览…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_file() {
+                            app.settings_draft.lr_install_path = p.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                // 缓存管理 (PRD 5.3.3 / 9.4).
+                ui.label(RichText::new("缓存").size(13.0).color(theme::ACCENT).strong());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("容量上限").size(13.0).color(theme::TEXT_WEAK));
+                    let mut cap = app.settings_draft.cache_capacity_gb as i64;
+                    if ui.add(egui::Slider::new(&mut cap, 2..=100).suffix(" GB")).changed() {
+                        app.settings_draft.cache_capacity_gb = cap.max(2) as u64;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("过期天数").size(13.0).color(theme::TEXT_WEAK));
+                    let mut days = app.settings_draft.cache_expire_days as i64;
+                    if ui.add(egui::DragValue::new(&mut days).range(7..=365).suffix(" 天")).changed() {
+                        app.settings_draft.cache_expire_days = days.max(7) as u64;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if app.cache_clean_running {
+                        let n = app.cache_clean_progress.load(Ordering::SeqCst);
+                        ui.label(
+                            RichText::new(format!("清理中… 已删除 {n} 个文件"))
+                                .size(13.0)
+                                .color(theme::ACCENT),
+                        );
+                    } else if ui.button("立即清理全部过期与超限缓存").clicked() {
+                        app.start_cache_clean(usize::MAX, true);
+                    }
+                    if ui.button("打开缓存文件夹").clicked() {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(crate::paths::cache_dir().to_string_lossy().into_owned())
+                            .spawn();
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("关于").size(13.0).color(theme::ACCENT).strong());
+                ui.label(RichText::new(format!("咔咔 v{}（M4）", env!("CARGO_PKG_VERSION"))).size(14.0).color(theme::TEXT));
+                ui.label(RichText::new("开源 · 无自动更新 · Windows x86_64").size(12.0).color(theme::TEXT_WEAK));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("保存").clicked() {
+                        save = true;
+                        app.state.show_settings = false;
+                    }
+                    if ui.button("取消").clicked() {
+                        // Discard draft, keep existing config.
+                        app.state.show_settings = false;
+                    }
+                });
             });
         });
     if save {

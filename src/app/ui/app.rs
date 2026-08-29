@@ -11,7 +11,7 @@ use crate::config;
 use crate::db::{self, Db};
 use crate::model::*;
 use eframe::egui;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
@@ -22,6 +22,12 @@ const ADD_THUMB_PREWARM: usize = 16;
 /// Memory cap for the Z-key full-resolution RAW texture LRU (PRD 7.4 / 9.5:
 /// 缓存在内存中，LRU 策略，总上限 2GB).
 const ZOOM_TEX_CAP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Small cleanup budget: max files removed per incremental cache clean (PRD 9.4).
+const CACHE_CLEAN_MAX_FILES: usize = 100;
+
+/// Idle interval that also triggers an incremental cache clean (PRD 9.4: 60s).
+const CACHE_CLEAN_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Messages sent from the background import thread back to the UI.
 pub enum ImportMsg {
@@ -135,6 +141,17 @@ pub struct KakaApp {
 
     // Confirm dialog (generic).
     pub confirm: Option<ConfirmDialog>,
+
+    // Disk-cache cleaner (PRD 9.4): small incremental cleans run in a
+    // background thread, triggered by browsing 50 photos or idling 60s.
+    pub cache_clean_rx: Option<Receiver<anyhow::Result<crate::io::cache_clean::CleanStats>>>,
+    pub cache_clean_running: bool,
+    /// True when the running clean was requested from settings (reports a toast).
+    pub cache_clean_full: bool,
+    pub cache_clean_progress: Arc<AtomicUsize>,
+    pub photos_since_clean: usize,
+    pub last_viewed_id: Option<i64>,
+    pub last_clean_at: std::time::Instant,
 }
 
 pub struct ConfirmDialog {
@@ -201,6 +218,13 @@ impl KakaApp {
             last_ws_folder: String::new(),
             startup,
             confirm: None,
+            cache_clean_rx: None,
+            cache_clean_running: false,
+            cache_clean_full: false,
+            cache_clean_progress: Arc::new(AtomicUsize::new(0)),
+            photos_since_clean: 0,
+            last_viewed_id: None,
+            last_clean_at: std::time::Instant::now(),
         };
         if app.startup.first_run {
             app.toast(
@@ -1029,6 +1053,96 @@ impl KakaApp {
         }
     }
 
+    // ---- Disk-cache cleaner (PRD 9.4) ----
+
+    /// Trigger an incremental clean when the user has browsed 50 photos or the
+    /// app has idled for 60s ( whichever first), capped at 100 files per run.
+    fn maybe_cache_clean(&mut self) {
+        if self.cache_clean_running {
+            return;
+        }
+        if self.photos_since_clean >= 50 || self.last_clean_at.elapsed() >= CACHE_CLEAN_IDLE {
+            self.photos_since_clean = 0;
+            self.last_clean_at = std::time::Instant::now();
+            self.start_cache_clean(CACHE_CLEAN_MAX_FILES, false);
+        }
+    }
+
+    /// Spawn a background cleanup pass. `max_files = usize::MAX` for the
+    /// settings-page 「立即清理」 (`full = true` reports a completion toast).
+    pub fn start_cache_clean(&mut self, max_files: usize, full: bool) {
+        if self.cache_clean_running {
+            return;
+        }
+        self.cache_clean_running = true;
+        self.cache_clean_full = full;
+        let cap = self
+            .state
+            .config
+            .cache_capacity_gb
+            .saturating_mul(1024 * 1024 * 1024);
+        let expire = self.state.config.cache_expire_days;
+        let progress = Arc::clone(&self.cache_clean_progress);
+        let (tx, rx) = channel();
+        self.cache_clean_rx = Some(rx);
+        std::thread::spawn(move || {
+            progress.store(0, Ordering::SeqCst);
+            let res = (|| -> anyhow::Result<crate::io::cache_clean::CleanStats> {
+                let idx = crate::io::cache_index::CacheIndex::open_default()?;
+                let dir = crate::paths::cache_dir();
+                crate::io::cache_clean::reconcile(&idx, &dir);
+                let mut prog = |done: usize| -> bool {
+                    progress.store(done, Ordering::SeqCst);
+                    true
+                };
+                crate::io::cache_clean::run_cleanup(&idx, &dir, cap, expire, max_files, &mut prog)
+            })();
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Non-blocking drain of cleanup results. Small cleans stay silent
+    /// (PRD 9.4 边用边删); a settings-triggered full clean toasts the outcome.
+    fn poll_cache_clean(&mut self) {
+        let Some(rx) = &self.cache_clean_rx else {
+            return;
+        };
+        if let Ok(res) = rx.try_recv() {
+            self.cache_clean_rx = None;
+            self.cache_clean_running = false;
+            let full = self.cache_clean_full;
+            self.cache_clean_full = false;
+            match res {
+                Ok(s) => {
+                    log::info!(
+                        "缓存清理完成：删除 {} 个（过期 {}），释放 {}",
+                        s.deleted,
+                        s.expired,
+                        crate::app::copy::human_bytes(s.freed_bytes as i64)
+                    );
+                    if full {
+                        self.toast(
+                            ToastKind::Success,
+                            format!(
+                                "缓存清理完成：删除 {} 个文件（过期 {}），释放 {}",
+                                s.deleted,
+                                s.expired,
+                                crate::app::copy::human_bytes(s.freed_bytes as i64)
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if full {
+                        self.toast(ToastKind::Error, format!("缓存清理失败：{e}"));
+                    } else {
+                        log::warn!("后台缓存清理失败: {e}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Enqueue background generation for every photo in the workspace whose
     /// thumbnail + preview caches are missing (PRD 9.3 / 3.1).
     pub fn enqueue_workspace_missing(&mut self) {
@@ -1073,6 +1187,7 @@ impl eframe::App for KakaApp {
         self.handle_card();
         self.poll_import();
         self.poll_zoom(&ctx);
+        self.poll_cache_clean();
         self.handle_input(&ctx);
 
         // Enqueue missing thumb caches once per workspace.
@@ -1081,6 +1196,16 @@ impl eframe::App for KakaApp {
             self.enqueue_workspace_missing();
         }
         self.drain_thumbs();
+
+        // Track viewed-photo count for the incremental cache clean (PRD 9.4).
+        let cur_id = self.state.ws.current().map(|p| p.id);
+        if cur_id != self.last_viewed_id {
+            self.last_viewed_id = cur_id;
+            if cur_id.is_some() {
+                self.photos_since_clean += 1;
+            }
+        }
+        self.maybe_cache_clean();
 
         self.maybe_autosave();
         self.expire_toasts();
