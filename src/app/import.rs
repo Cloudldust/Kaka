@@ -68,7 +68,11 @@ pub fn add_mode_import_with_thumbs(
     on_thumb: &mut dyn FnMut(i64, &str, &str),
 ) -> anyhow::Result<ImportOutcome> {
     if !source.exists() || !source.is_dir() {
-        anyhow::bail!("源路径不存在或不是文件夹: {}", source.display());
+        anyhow::bail!(
+            "{}{}",
+            crate::i18n::t("源路径不存在或不是文件夹: ", "Source path does not exist or is not a folder: "),
+            source.display()
+        );
     }
 
     let items = scanner::scan_folder(source, ScanOptions { recursive })?;

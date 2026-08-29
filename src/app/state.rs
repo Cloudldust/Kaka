@@ -125,14 +125,22 @@ impl ImportResult {
     /// Short summary for the completion toast.
     pub fn summary(&self) -> String {
         match self {
-            ImportResult::Add(o) => format!(
-                "已将 {} 张照片添加到图库，文件保留在原位",
-                o.added
-            ),
-            ImportResult::Copy(o) => format!(
-                "成功导入 {} 张（已存在跳过 {} 张，失败 {} 张）",
-                o.copied, o.skipped_existing, o.failed
-            ),
+            ImportResult::Add(o) => match crate::i18n::lang() {
+                crate::i18n::Lang::Zh => {
+                    format!("已将 {} 张照片添加到图库，文件保留在原位", o.added)
+                }
+                crate::i18n::Lang::En => {
+                    format!("Added {} photos to the library (files left in place)", o.added)
+                }
+            },
+            ImportResult::Copy(o) => match crate::i18n::lang() {
+                crate::i18n::Lang::Zh => {
+                    format!("成功导入 {} 张（已存在跳过 {} 张，失败 {} 张）", o.copied, o.skipped_existing, o.failed)
+                }
+                crate::i18n::Lang::En => {
+                    format!("Imported {} photos ({} skipped as existing, {} failed)", o.copied, o.skipped_existing, o.failed)
+                }
+            },
         }
     }
 }

@@ -73,18 +73,19 @@ impl SortOrder {
             SortOrder::StatusGrouped => "status_grouped",
         }
     }
-    pub fn label(self) -> &'static str {
-        match self {
-            SortOrder::CaptureTimeAsc => "拍摄时间 ↑",
-            SortOrder::CaptureTimeDesc => "拍摄时间 ↓",
-            SortOrder::FilenameAsc => "文件名 A-Z",
-            SortOrder::FilenameDesc => "文件名 Z-A",
-            SortOrder::FileSizeAsc => "文件大小 小→大",
-            SortOrder::FileSizeDesc => "文件大小 大→小",
-            SortOrder::ImportTimeAsc => "导入时间 ↑",
-            SortOrder::ImportTimeDesc => "导入时间 ↓",
-            SortOrder::StatusGrouped => "状态分组",
-        }
+    pub fn label(self) -> String {
+        let (zh, en) = match self {
+            SortOrder::CaptureTimeAsc => ("拍摄时间 ↑", "Capture time ↑"),
+            SortOrder::CaptureTimeDesc => ("拍摄时间 ↓", "Capture time ↓"),
+            SortOrder::FilenameAsc => ("文件名 A-Z", "Filename A-Z"),
+            SortOrder::FilenameDesc => ("文件名 Z-A", "Filename Z-A"),
+            SortOrder::FileSizeAsc => ("文件大小 小→大", "File size small→large"),
+            SortOrder::FileSizeDesc => ("文件大小 大→小", "File size large→small"),
+            SortOrder::ImportTimeAsc => ("导入时间 ↑", "Import time ↑"),
+            SortOrder::ImportTimeDesc => ("导入时间 ↓", "Import time ↓"),
+            SortOrder::StatusGrouped => ("状态分组", "Group by status"),
+        };
+        crate::i18n::t(zh, en).to_string()
     }
 }
 
@@ -256,6 +257,8 @@ pub struct AppConfig {
     pub export_space_guard: bool,
     /// User-specified Lightroom Classic install path (empty = auto-detect).
     pub lr_install_path: String,
+    /// UI language code: "zh" (default) or "en".
+    pub language: String,
 }
 
 impl Default for AppConfig {
@@ -283,6 +286,7 @@ impl Default for AppConfig {
             include_sidecar_export: true,
             export_space_guard: true,
             lr_install_path: String::new(),
+            language: "zh".to_string(),
         }
     }
 }

@@ -7,6 +7,7 @@ use crate::app::card::{CardDetector, CardEvent};
 use crate::app::memcache::MemLru;
 use crate::app::thumbs::ThumbWorker;
 use crate::app::zoom::{ZoomMsg, ZoomWorker};
+use crate::i18n::{self, t};
 use crate::config;
 use crate::db::{self, Db};
 use crate::model::*;
@@ -152,6 +153,8 @@ pub struct KakaApp {
     pub photos_since_clean: usize,
     pub last_viewed_id: Option<i64>,
     pub last_clean_at: std::time::Instant,
+    /// Cache usage snapshot (total bytes, file count) taken when settings open.
+    pub cache_usage: Option<(i64, i64)>,
 }
 
 pub struct ConfirmDialog {
@@ -225,11 +228,13 @@ impl KakaApp {
             photos_since_clean: 0,
             last_viewed_id: None,
             last_clean_at: std::time::Instant::now(),
+            cache_usage: None,
         };
         if app.startup.first_run {
             app.toast(
                 ToastKind::Info,
-                "欢迎使用咔咔！只做导入+筛选。点击「导入」开始添加照片。",
+                t("欢迎使用咔咔！只做导入+筛选。点击「导入」开始添加照片。",
+                  "Welcome to Kaka! Import + cull only. Click Import to add your first photos."),
             );
         }
         app
@@ -243,6 +248,7 @@ pub fn run() -> anyhow::Result<()> {
 
     // 1. Config.
     let cfg = config::load();
+    i18n::set_lang(i18n::Lang::from_code(&cfg.language));
 
     // 2. Database open + integrity + migration.
     let (db, startup) = init_database()?;
@@ -434,21 +440,29 @@ impl KakaApp {
                                         .map(std::path::PathBuf::from)
                                         .collect();
                                     self.confirm = Some(ConfirmDialog {
-                                        title: "清空存储卡".into(),
-                                        text: format!(
-                                            "导入完成。是否将卡中 {n} 张已成功导入的照片移入回收站？（仅成功导入的文件会被清除，失败/取消的文件保留在卡中）"
-                                        ),
-                                        confirm_label: "移入回收站".into(),
+                                        title: t("清空存储卡", "Clear memory card").into(),
+                                        text: match i18n::lang() {
+                                            i18n::Lang::Zh => format!(
+                                                "导入完成。是否将卡中 {n} 张已成功导入的照片移入回收站？（仅成功导入的文件会被清除，失败/取消的文件保留在卡中）"
+                                            ),
+                                            i18n::Lang::En => format!(
+                                                "Import finished. Move the {n} successfully imported files on the card to the recycle bin? (Only fully imported files are cleared; failed/skipped files stay on the card.)"
+                                            ),
+                                        },
+                                        confirm_label: t("移入回收站", "Move to recycle bin").into(),
                                         danger: true,
                                         on_confirm: Box::new(move |app| {
                                             match crate::io::recycle::move_to_recycle_bin(&paths) {
-                                                Ok(()) => app.toast(
-                                                    ToastKind::Success,
-                                                    format!("已将 {n} 张源文件移入回收站"),
-                                                ),
+                                                Ok(()) => {
+                                                    let msg = match i18n::lang() {
+                                                        i18n::Lang::Zh => format!("已将 {n} 张源文件移入回收站"),
+                                                        i18n::Lang::En => format!("Moved {n} source files to the recycle bin"),
+                                                    };
+                                                    app.toast(ToastKind::Success, msg);
+                                                }
                                                 Err(e) => app.toast(
                                                     ToastKind::Error,
-                                                    format!("清空存储卡失败：{e}"),
+                                                    format!("{}{e}", t("清空存储卡失败：", "Clear memory card failed: ")),
                                                 ),
                                             }
                                         }),
@@ -532,7 +546,7 @@ impl KakaApp {
         });
         if next {
             if self.state.step(1) {
-                self.toast(ToastKind::Info, "已是最后一张");
+                self.toast(ToastKind::Info, t("已是最后一张", "Already at the last photo"));
             }
             self.needs_save = true;
             return;
@@ -543,7 +557,7 @@ impl KakaApp {
         });
         if prev {
             if self.state.step(-1) {
-                self.toast(ToastKind::Info, "已是第一张");
+                self.toast(ToastKind::Info, t("已是第一张", "Already at the first photo"));
             }
             self.needs_save = true;
             return;
@@ -552,13 +566,18 @@ impl KakaApp {
         // Home / End.
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
             self.state.jump_to(0);
-            self.toast(ToastKind::Info, "已跳到第 1 张");
+            self.toast(ToastKind::Info, t("已跳到第 1 张", "Jumped to photo 1"));
             self.needs_save = true;
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
             self.state.jump_to(self.state.ws.items.len().saturating_sub(1));
-            self.toast(ToastKind::Info, format!("已跳到第 {} 张", self.state.ws.items.len()));
+            let n = self.state.ws.items.len();
+            let msg = match i18n::lang() {
+                i18n::Lang::Zh => format!("已跳到第 {n} 张"),
+                i18n::Lang::En => format!("Jumped to photo {n}"),
+            };
+            self.toast(ToastKind::Info, msg);
             self.needs_save = true;
             return;
         }
@@ -566,7 +585,7 @@ impl KakaApp {
         // Undo / redo (single Q/E/U operations only, PRD 7.2).
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Z)) {
             if self.state.undo() {
-                self.toast(ToastKind::Info, "已撤销");
+                self.toast(ToastKind::Info, t("已撤销", "Undone"));
                 self.needs_save = true;
             }
             return;
@@ -576,7 +595,7 @@ impl KakaApp {
                 || i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z)
         }) {
             if self.state.redo() {
-                self.toast(ToastKind::Info, "已重做");
+                self.toast(ToastKind::Info, t("已重做", "Redone"));
                 self.needs_save = true;
             }
             return;
@@ -585,18 +604,23 @@ impl KakaApp {
         // Select all / deselect (PRD 7.9.1).
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::A)) {
             self.state.select_all(true);
-            self.toast(ToastKind::Info, format!("已全选 {} 张", self.state.ws.selected_count()));
+            let n = self.state.ws.selected_count();
+            let msg = match i18n::lang() {
+                i18n::Lang::Zh => format!("已全选 {n} 张"),
+                i18n::Lang::En => format!("Selected all {n}"),
+            };
+            self.toast(ToastKind::Info, msg);
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::A)) {
             self.state.select_all(false);
-            self.toast(ToastKind::Info, "已取消全选");
+            self.toast(ToastKind::Info, t("已取消全选", "Deselected all"));
             return;
         }
         // Esc: clear selection first, then exit 100% zoom (PRD 7.2 / 7.4).
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             if self.state.clear_selection() {
-                self.toast(ToastKind::Info, "已取消选择");
+                self.toast(ToastKind::Info, t("已取消选择", "Selection cleared"));
             } else if self.zoom_active {
                 self.zoom_active = false;
             }
@@ -622,7 +646,7 @@ impl KakaApp {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
             self.zoom_active = false;
-            self.toast(ToastKind::Info, "已重置为适配窗口");
+            self.toast(ToastKind::Info, t("已重置为适配窗口", "Reset to fit"));
             return;
         }
 
@@ -647,7 +671,7 @@ impl KakaApp {
             if changed {
                 let blocked = self.state.step(1);
                 if blocked {
-                    self.toast(ToastKind::Warning, "已是最后一张");
+                    self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
                 }
             }
             return;
@@ -658,7 +682,7 @@ impl KakaApp {
             if changed {
                 let blocked = self.state.step(1);
                 if blocked {
-                    self.toast(ToastKind::Warning, "已是最后一张");
+                    self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
                 }
             }
             return;
@@ -673,7 +697,7 @@ impl KakaApp {
         // Ctrl+S save; Ctrl+I / Ctrl+O open import.
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S)) {
             self.save_workspace();
-            self.toast(ToastKind::Success, "工作区已保存");
+            self.toast(ToastKind::Success, t("工作区已保存", "Workspace saved"));
             return;
         }
         if ctx.input_mut(|i| {
@@ -689,25 +713,34 @@ impl KakaApp {
     fn apply_batch_status(&mut self, status: Status) {
         let n = self.state.ws.selected_count();
         if n == 0 {
-            self.toast(ToastKind::Warning, "请先选中要批量的照片（Ctrl+单击 / Ctrl+A）");
+            self.toast(ToastKind::Warning, t("请先选中要批量的照片（Ctrl+单击 / Ctrl+A）", "Select photos first (Ctrl+click / Ctrl+A)"));
             return;
         }
         let label = match status {
-            Status::Delete => "待删",
-            Status::Reviewed => "已阅",
-            Status::Untreated => "未处理",
+            Status::Delete => t("待删", "delete"),
+            Status::Reviewed => t("已阅", "reviewed"),
+            Status::Untreated => t("未处理", "unprocessed"),
         };
         if self.state.config.batch_confirm {
             let status_copy = status;
             self.confirm = Some(ConfirmDialog {
                 title: "批量操作".into(),
-                text: format!("将选中的 {n} 张照片标记为「{label}」？此操作不可撤销。"),
-                confirm_label: "确认".into(),
+                text: match i18n::lang() {
+                    i18n::Lang::Zh => format!("将选中的 {n} 张照片标记为「{label}」？此操作不可撤销。"),
+                    i18n::Lang::En => format!("Mark {n} selected photo(s) as '{label}'? This cannot be undone."),
+                },
+                confirm_label: t("确认", "Confirm").into(),
                 danger: status == Status::Delete,
                 on_confirm: Box::new(move |app| {
                     match app.state.set_status_selected(status_copy) {
-                        Ok(_) => app.toast(ToastKind::Success, format!("已将 {n} 张标记为「{label}」")),
-                        Err(e) => app.toast(ToastKind::Error, format!("批量标记失败：{e}")),
+                        Ok(_) => {
+                            let msg = match i18n::lang() {
+                                i18n::Lang::Zh => format!("已将 {n} 张标记为「{label}」"),
+                                i18n::Lang::En => format!("Marked {n} photo(s) as '{label}'"),
+                            };
+                            app.toast(ToastKind::Success, msg);
+                        }
+                        Err(e) => app.toast(ToastKind::Error, format!("{}{e}", t("批量标记失败：", "Batch marking failed: "))),
                     }
                     app.needs_save = true;
                 }),
@@ -715,8 +748,14 @@ impl KakaApp {
         } else {
             let r = self.state.set_status_selected(status);
             match r {
-                Ok(_) => self.toast(ToastKind::Success, format!("已将 {n} 张标记为「{label}」")),
-                Err(e) => self.toast(ToastKind::Error, format!("批量标记失败：{e}")),
+                Ok(_) => {
+                    let msg = match i18n::lang() {
+                        i18n::Lang::Zh => format!("已将 {n} 张标记为「{label}」"),
+                        i18n::Lang::En => format!("Marked {n} photo(s) as '{label}'"),
+                    };
+                    self.toast(ToastKind::Success, msg);
+                }
+                Err(e) => self.toast(ToastKind::Error, format!("{}{e}", t("批量标记失败：", "Batch marking failed: "))),
             }
             self.needs_save = true;
         }
@@ -941,6 +980,12 @@ impl KakaApp {
     /// Open the settings dialog, seeding the draft from the current config.
     pub fn open_settings(&mut self) {
         self.settings_draft = self.state.config.clone();
+        // Best-effort cache usage snapshot for the settings dialog.
+        self.cache_usage = crate::io::cache_index::CacheIndex::open_default().ok().and_then(|idx| {
+            let size = idx.total_size().ok()?;
+            let count = idx.count().ok()?;
+            Some((size, count))
+        });
         self.state.show_settings = true;
     }
 
@@ -995,7 +1040,7 @@ impl KakaApp {
                 item.decode_failed = false;
             }
             self.request_zoom_decode(&p);
-            self.toast(ToastKind::Info, "正在重新解码 RAW…");
+            self.toast(ToastKind::Info, t("正在重新解码 RAW…", "Retrying RAW decode…"));
         }
     }
 
@@ -1045,7 +1090,8 @@ impl KakaApp {
                         }
                         self.toast(
                             ToastKind::Warning,
-                            "RAW 解码失败，已标记为仅显示内嵌预览（右键可强制重试）",
+                            t("RAW 解码失败，已标记为仅显示内嵌预览（右键可强制重试）",
+                              "RAW decode failed — marked preview-only (right-click to force retry)"),
                         );
                     }
                 },

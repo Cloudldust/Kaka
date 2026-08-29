@@ -41,7 +41,7 @@ pub fn export_kept_copy(
     progress: ExportProgress,
 ) -> anyhow::Result<ExportOutcome> {
     if target_dir.trim().is_empty() {
-        anyhow::bail!("未设置导出目录");
+        anyhow::bail!("{}", crate::i18n::t("未设置导出目录", "Export directory not set"));
     }
     std::fs::create_dir_all(target_dir)?;
     let root = PathBuf::from(folder);
@@ -332,7 +332,7 @@ pub fn send_to_lightroom(db: &Db, folder: &str, lr_exe: &Path) -> anyhow::Result
         .collect();
 
     if kept.is_empty() {
-        anyhow::bail!("工作区没有保留照片");
+        anyhow::bail!("{}", crate::i18n::t("工作区没有保留照片", "No kept photos in this workspace"));
     }
 
     // Write the .lrtemplate placeholder list.

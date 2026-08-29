@@ -3,6 +3,7 @@
 
 use super::app::KakaApp;
 use super::theme;
+use crate::i18n::t;
 use crate::model::{PhotoListItem, SortOrder, Status};
 use eframe::egui::{self, Align, Align2, Layout, RichText};
 
@@ -34,7 +35,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 let label = truncate_path(&path, 44);
                 ui.label(RichText::new(label).size(14.0).color(theme::TEXT))
                     .on_hover_text(if path.is_empty() {
-                        "未打开文件夹".to_string()
+                        t("未打开文件夹", "No folder open").to_string()
                     } else {
                         path.clone()
                     });
@@ -48,7 +49,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut search)
                         .desired_width(200.0)
-                        .hint_text("搜索文件名 / @过滤条件"),
+                        .hint_text(t("搜索文件名 / @过滤条件", "Search filename / @filters")),
                 );
                 if resp.changed() {
                     app.state.ws.search = search;
@@ -64,12 +65,12 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 let filter_active = app.state.ws.filter.is_active();
                 let filter_btn_style = if filter_active {
                     egui::Button::new(
-                        RichText::new("过滤").strong().color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
+                        RichText::new(t("过滤", "Filter")).strong().color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
                     )
                     .fill(theme::ACCENT)
                     .stroke(egui::Stroke::new(1.0, theme::ACCENT))
                 } else {
-                    egui::Button::new(RichText::new("过滤").color(theme::TEXT_SECONDARY))
+                    egui::Button::new(RichText::new(t("过滤", "Filter")).color(theme::TEXT_SECONDARY))
                 };
                 if ui.add(filter_btn_style).clicked() {
                     app.filter_draft = app.state.ws.filter.clone();
@@ -78,7 +79,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let del = app.state.ws.counts.deleted;
-                    let del_text = format!("待删 ({del})");
+                    let del_text = format!("{} ({del})", t("待删", "Delete"));
                     let btn = if del > 0 {
                         egui::Button::new(
                             RichText::new(del_text).strong().color(egui::Color32::WHITE),
@@ -93,7 +94,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                     }
 
                     let import_btn = egui::Button::new(
-                        RichText::new("导入")
+                        RichText::new(t("导入", "Import"))
                             .size(15.0)
                             .strong()
                             .color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
@@ -105,7 +106,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                     }
 
                     // 导出 (PRD 12): only with an open workspace.
-                    let export_btn = egui::Button::new(RichText::new("导出").size(15.0).color(theme::TEXT_SECONDARY));
+                    let export_btn = egui::Button::new(RichText::new(t("导出", "Export")).size(15.0).color(theme::TEXT_SECONDARY));
                     let resp = ui.add_enabled(has_ws, export_btn);
                     if resp.clicked() {
                         if app.export_target.trim().is_empty() {
@@ -174,7 +175,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             if app.state.ws.items.is_empty() {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("暂无照片").color(theme::TEXT_WEAK));
+                    ui.label(RichText::new(t("暂无照片", "No photos")).color(theme::TEXT_WEAK));
                 });
             } else {
                 render_thumb_strip(app, ui);
@@ -233,7 +234,7 @@ fn truncate_path(path: &str, max: usize) -> String {
 fn sort_dropdown(app: &mut KakaApp, ui: &mut egui::Ui) {
     let current = app.state.ws.sort;
     egui::ComboBox::from_id_salt("sort")
-        .selected_text(format!("☰ 排序: {}", current.label()))
+        .selected_text(format!("☰ {}: {}", t("排序", "Sort"), current.label()))
         .width(150.0)
         .show_ui(ui, |ui| {
             for so in [
@@ -269,7 +270,7 @@ fn apply_search(app: &mut KakaApp, needle: &str) {
 fn render_status_bar(app: &mut KakaApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let gear = egui::Button::new(RichText::new("⚙").size(18.0).color(theme::TEXT_SECONDARY));
-        if ui.add(gear).on_hover_text("设置").clicked() {
+        if ui.add(gear).on_hover_text(t("设置", "Settings")).clicked() {
             app.open_settings();
         }
         ui.separator();
@@ -280,24 +281,24 @@ fn render_status_bar(app: &mut KakaApp, ui: &mut egui::Ui) {
         let green = total > 0 && processed >= total;
         let frac_color = if green { theme::KEEP } else { theme::TEXT };
         ui.label(
-            RichText::new(format!("已筛选 {processed} / {total}"))
+            RichText::new(format!("{} {processed} / {total}", t("已筛选", "Processed")))
                 .size(14.0)
                 .color(frac_color)
                 .strong(),
         );
         sep(ui);
-        ui.label(RichText::new(format!("保留 {}", total - counts.deleted)).size(14.0).color(theme::KEEP));
+        ui.label(RichText::new(format!("{} {}", t("保留", "Keep"), total - counts.deleted)).size(14.0).color(theme::KEEP));
         sep(ui);
-        ui.label(RichText::new(format!("已阅 {}", counts.reviewed)).size(14.0).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(format!("{} {}", t("已阅", "Reviewed"), counts.reviewed)).size(14.0).color(theme::TEXT_SECONDARY));
         sep(ui);
-        ui.label(RichText::new(format!("待删 {}", counts.deleted)).size(14.0).color(theme::DELETE));
+        ui.label(RichText::new(format!("{} {}", t("待删", "Delete"), counts.deleted)).size(14.0).color(theme::DELETE));
         if app.state.ws.selected_count() > 0 {
             sep(ui);
-            ui.label(RichText::new(format!("选中 {}", app.state.ws.selected_count())).size(14.0).color(theme::ACCENT));
+            ui.label(RichText::new(format!("{} {}", t("选中", "Selected"), app.state.ws.selected_count())).size(14.0).color(theme::ACCENT));
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new("Q 待删 | E 跳过 | ← → 切换").size(13.0).color(theme::TEXT_WEAK));
+            ui.label(RichText::new(t("Q 待删 | E 跳过 | ← → 切换", "Q delete | E skip | left/right navigate")).size(13.0).color(theme::TEXT_WEAK));
         });
     });
 }
@@ -402,7 +403,7 @@ fn thumb_widget(
             painter.text(
                 badge.center(),
                 Align2::CENTER_CENTER,
-                "待删",
+                t("待删", "Delete"),
                 egui::FontId::proportional(10.0),
                 egui::Color32::WHITE,
             );
@@ -416,7 +417,7 @@ fn thumb_widget(
             painter.text(
                 badge.center(),
                 Align2::CENTER_CENTER,
-                "已阅",
+                t("已阅", "Reviewed"),
                 egui::FontId::proportional(10.0),
                 egui::Color32::from_rgb(0x0f, 0x2a, 0x1c),
             );
@@ -519,11 +520,11 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             let status = if !is_raw {
                 "100%".to_string()
             } else if full_tex.is_some() {
-                "100% · RAW 原生像素".to_string()
+                t("100% · RAW 原生像素", "100% · RAW pixels").to_string()
             } else if app.zoom_worker.is_pending(item.id) {
-                "100% · RAW 解码中…（先以内嵌预览显示）".to_string()
+                t("100% · RAW 解码中…（先以内嵌预览显示）", "100% · decoding RAW… (embedded preview)").to_string()
             } else if item.decode_failed {
-                "100% · RAW 解码失败，显示内嵌预览（右键可重试）".to_string()
+                t("100% · RAW 解码失败，显示内嵌预览（右键可重试）", "100% · RAW decode failed — embedded preview (right-click to retry)").to_string()
             } else {
                 "100%".to_string()
             };
@@ -560,7 +561,7 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                 painter.text(
                     badge.center(),
                     Align2::CENTER_CENTER,
-                    "待删",
+                    t("待删", "Delete"),
                     egui::FontId::proportional(12.0),
                     egui::Color32::WHITE,
                 );
@@ -574,7 +575,7 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                 painter.text(
                     badge.center(),
                     Align2::CENTER_CENTER,
-                    "已阅",
+                    t("已阅", "Reviewed"),
                     egui::FontId::proportional(12.0),
                     egui::Color32::from_rgb(0x0f, 0x2a, 0x1c),
                 );
@@ -596,30 +597,30 @@ fn preview_context_menu(
     item: &PhotoListItem,
 ) {
     resp.context_menu(|ui| {
-        if ui.button("标记待删（Q）").clicked() {
+        if ui.button(t("标记待删（Q）", "Mark for deletion (Q)")).clicked() {
             let _ = app.state.set_status_current(Status::Delete, true);
             let _ = app.state.step(1);
             app.needs_save = true;
         }
-        if ui.button("标记已阅跳过（E）").clicked() {
+        if ui.button(t("标记已阅跳过（E）", "Mark reviewed / skip (E)")).clicked() {
             let _ = app.state.set_status_current(Status::Reviewed, true);
             let _ = app.state.step(1);
             app.needs_save = true;
         }
-        if ui.button("重置为未处理（U）").clicked() {
+        if ui.button(t("重置为未处理（U）", "Reset to unprocessed (U)")).clicked() {
             let _ = app.state.set_status_current(Status::Untreated, true);
             app.needs_save = true;
         }
         ui.separator();
-        if item.decode_failed && ui.button("强制重试 RAW 解码").clicked() {
+        if item.decode_failed && ui.button(t("强制重试 RAW 解码", "Force RAW decode retry")).clicked() {
             app.retry_zoom_decode(item.id);
         }
-        if ui.button("在资源管理器中显示").clicked() {
+        if ui.button(t("在资源管理器中显示", "Show in Explorer")).clicked() {
             let _ = std::process::Command::new("explorer")
                 .arg(format!("/select,{}", item.current_path))
                 .spawn();
         }
-        if ui.button("复制文件路径").clicked() {
+        if ui.button(t("复制文件路径", "Copy file path")).clicked() {
             ui.ctx().copy_text(item.current_path.clone());
         }
     });
@@ -627,20 +628,20 @@ fn preview_context_menu(
 
 fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
-    ui.label(RichText::new("信息面板").size(12.0).color(theme::TEXT_SECONDARY).strong());
+    ui.label(RichText::new(t("信息面板", "Photo info")).size(12.0).color(theme::TEXT_SECONDARY).strong());
     ui.separator();
     match app.state.ws.current().cloned() {
         Some(p) => {
             let rows: Vec<(&str, String)> = vec![
-                ("相机", p.camera_model.clone().unwrap_or_else(|| "—".into())),
-                ("镜头", p.lens_model.clone().unwrap_or_else(|| "—".into())),
-                ("焦距", p.focal_length.map(|v| format!("{v} mm")).unwrap_or_else(|| "—".into())),
-                ("光圈", p.aperture.clone().unwrap_or_else(|| "—".into())),
-                ("快门", p.shutter_speed.clone().unwrap_or_else(|| "—".into())),
+                (t("相机", "Camera"), p.camera_model.clone().unwrap_or_else(|| "—".into())),
+                (t("镜头", "Lens"), p.lens_model.clone().unwrap_or_else(|| "—".into())),
+                (t("焦距", "Focal length"), p.focal_length.map(|v| format!("{v} mm")).unwrap_or_else(|| "—".into())),
+                (t("光圈", "Aperture"), p.aperture.clone().unwrap_or_else(|| "—".into())),
+                (t("快门", "Shutter"), p.shutter_speed.clone().unwrap_or_else(|| "—".into())),
                 ("ISO", p.iso.map(|v| v.to_string()).unwrap_or_else(|| "—".into())),
-                ("时间", p.capture_time.clone()),
-                ("大小", human_size(p.file_size)),
-                ("文件名", p.original_filename.clone()),
+                (t("时间", "Taken"), p.capture_time.clone()),
+                (t("大小", "Size"), human_size(p.file_size)),
+                (t("文件名", "File"), p.original_filename.clone()),
             ];
             for (label, value) in rows {
                 ui.horizontal(|ui| {
@@ -650,22 +651,22 @@ fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
             }
             ui.separator();
             let (label, color) = match p.status {
-                Status::Untreated => ("未处理", theme::TEXT_SECONDARY),
-                Status::Delete => ("待删", theme::DELETE),
-                Status::Reviewed => ("已阅", theme::KEEP),
+                Status::Untreated => (t("未处理", "Untreated"), theme::TEXT_SECONDARY),
+                Status::Delete => (t("待删", "Delete"), theme::DELETE),
+                Status::Reviewed => (t("已阅", "Reviewed"), theme::KEEP),
             };
-            ui.label(RichText::new(format!("状态: {label}")).size(14.0).color(color).strong());
+            ui.label(RichText::new(format!("{}: {label}", t("状态", "Status"))).size(14.0).color(color).strong());
             // Decode-state hints (PRD 3.4 / 7.4.3 / 2.3).
             if p.decode_failed {
                 ui.label(
-                    RichText::new("RAW 解码失败，当前显示内嵌预览")
+                    RichText::new(t("RAW 解码失败，当前显示内嵌预览", "RAW decode failed — showing embedded preview"))
                         .size(12.0)
                         .color(theme::ACCENT),
                 );
             }
             if p.preview_only {
                 ui.label(
-                    RichText::new("此格式暂不支持完整解码")
+                    RichText::new(t("此格式暂不支持完整解码", "This format can't be fully decoded"))
                         .size(12.0)
                         .color(theme::ACCENT),
                 );
@@ -676,14 +677,14 @@ fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
             draw_histogram(app, ui, p.id, p.thumb_hash.as_deref().unwrap_or(""));
         }
         None => {
-            ui.label(RichText::new("未选择照片").color(theme::TEXT_WEAK));
+            ui.label(RichText::new(t("未选择照片", "No photo selected")).color(theme::TEXT_WEAK));
         }
     }
 }
 
 /// Draw the current photo's histogram in the right panel (PRD 7.5).
 fn draw_histogram(app: &mut KakaApp, ui: &mut egui::Ui, photo_id: i64, hash: &str) {
-    ui.label(RichText::new("直方图").size(12.0).color(theme::TEXT_SECONDARY).strong());
+    ui.label(RichText::new(t("直方图", "Histogram")).size(12.0).color(theme::TEXT_SECONDARY).strong());
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 110.0), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, theme::PREVIEW_BG);
@@ -693,7 +694,7 @@ fn draw_histogram(app: &mut KakaApp, ui: &mut egui::Ui, photo_id: i64, hash: &st
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
-            "无缓存",
+            t("无缓存", "No cache"),
             egui::FontId::proportional(12.0),
             theme::TEXT_WEAK,
         );
@@ -703,7 +704,7 @@ fn draw_histogram(app: &mut KakaApp, ui: &mut egui::Ui, photo_id: i64, hash: &st
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
-            "预览生成后显示",
+            t("预览生成后显示", "Available once the preview is generated"),
             egui::FontId::proportional(12.0),
             theme::TEXT_WEAK,
         );
@@ -748,7 +749,7 @@ fn plot_histogram(painter: &egui::Painter, rect: egui::Rect, h: &crate::io::hist
         painter.text(
             egui::pos2(rect.min.x + 6.0, rect.min.y + 1.0),
             Align2::LEFT_TOP,
-            "暗部死黑",
+            t("暗部死黑", "Shadow clipping"),
             egui::FontId::proportional(10.0),
             theme::DELETE,
         );
@@ -762,7 +763,7 @@ fn plot_histogram(painter: &egui::Painter, rect: egui::Rect, h: &crate::io::hist
         painter.text(
             egui::pos2(rect.max.x - 6.0, rect.min.y + 1.0),
             Align2::RIGHT_TOP,
-            "高光溢出",
+            t("高光溢出", "Highlight clipping"),
             egui::FontId::proportional(10.0),
             theme::DELETE,
         );
@@ -790,14 +791,14 @@ fn render_empty_state(app: &mut KakaApp, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(20.0);
             ui.label(RichText::new("📷").size(48.0).color(theme::TEXT_WEAK));
-            ui.label(RichText::new("暂无打开的工作区").size(20.0).strong().color(theme::TEXT));
-            ui.label(RichText::new("开始导入你的第一批照片，或从已有文件夹开始筛选。").size(14.0).color(theme::TEXT_SECONDARY));
-            ui.label(RichText::new("所有操作仅索引，不修改原文件。").size(14.0).color(theme::TEXT_SECONDARY));
+            ui.label(RichText::new(t("暂无打开的工作区", "No workspace open")).size(20.0).strong().color(theme::TEXT));
+            ui.label(RichText::new(t("开始导入你的第一批照片，或从已有文件夹开始筛选。", "Import your first photos, or pick an existing folder to start culling.")).size(14.0).color(theme::TEXT_SECONDARY));
+            ui.label(RichText::new(t("所有操作仅索引，不修改原文件。", "Index-only: your source files are never modified.")).size(14.0).color(theme::TEXT_SECONDARY));
             ui.add_space(16.0);
             if ui
                 .add(
                     egui::Button::new(
-                        RichText::new("添加硬盘文件夹")
+                        RichText::new(t("添加硬盘文件夹", "Add disk folder"))
                             .size(15.0)
                             .strong()
                             .color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
@@ -810,7 +811,7 @@ fn render_empty_state(app: &mut KakaApp, ui: &mut egui::Ui) {
                 app.state.show_import = true;
             }
             ui.add_space(12.0);
-            ui.label(RichText::new("提示：你也可以直接将文件夹拖入窗口 →").size(12.0).color(theme::TEXT_WEAK));
+            ui.label(RichText::new(t("提示：你也可以直接将文件夹拖入窗口 →", "Tip: you can also drop a folder onto the window")).size(12.0).color(theme::TEXT_WEAK));
         });
     });
 }

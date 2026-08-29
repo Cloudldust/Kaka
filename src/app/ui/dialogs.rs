@@ -1,6 +1,7 @@
 //! Modal dialogs: import, crash recovery, settings, delete box, confirm, toasts.
 
 use super::app::{ConfirmDialog, KakaApp, ToastKind};
+use crate::i18n::{self, t};
 use super::theme;
 use crate::model::{SortOrder, Status};
 use crate::db;
@@ -46,25 +47,26 @@ fn resume_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     let target = session.target.clone();
 
     dim_backdrop(ctx);
-    egui::Window::new("断点续传")
+    egui::Window::new(t("断点续传", "Resume import"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .fixed_size([520.0, 260.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            ui.label(RichText::new("检测到上次有未完成的导入任务").size(20.0).strong().color(theme::TEXT));
+            ui.label(RichText::new(t("检测到上次有未完成的导入任务", "An import was interrupted")).size(20.0).strong().color(theme::TEXT));
             ui.add_space(8.0);
             ui.label(
-                RichText::new(format!(
-                    "共 {total} 张，已完成 {done} 张。\n是否从断点继续导入到：{target}"
-                ))
+                RichText::new(match i18n::lang() {
+                    i18n::Lang::Zh => format!("共 {total} 张，已完成 {done} 张。\n是否从断点继续导入到：{target}"),
+                    i18n::Lang::En => format!("{done} of {total} files done.\nContinue importing to: {target}?"),
+                })
                 .size(14.0)
                 .color(theme::TEXT_SECONDARY),
             );
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.add(primary_button("继续导入")).clicked() {
+                if ui.add(primary_button(t("继续导入", "Continue import"))).clicked() {
                     let opts = session.copy_options();
                     // Reopen the import dialog showing copy mode so the user sees progress.
                     app.import_mode = crate::app::state::ImportMode::Copy;
@@ -77,14 +79,14 @@ fn resume_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     app.pending_resume = None;
                 }
                 if ui
-                    .button(RichText::new("放弃本次任务").color(theme::DELETE))
+                    .button(RichText::new(t("放弃本次任务", "Discard task")).color(theme::DELETE))
                     .clicked()
                 {
                     let mut s = session;
                     let _ = crate::app::session::abandon(&mut s);
                     app.show_resume = false;
                     app.pending_resume = None;
-                    app.toast(ToastKind::Info, "已放弃本次未完成的导入任务");
+                    app.toast(ToastKind::Info, t("已放弃本次未完成的导入任务", "Discarded the unfinished import"));
                 }
             });
         });
@@ -102,21 +104,20 @@ fn dim_backdrop(ctx: &egui::Context) {
 
 fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     dim_backdrop(ctx);
-    egui::Window::new("导入照片")
+    egui::Window::new(t("导入照片", "Import Photos"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .fixed_size([680.0, 460.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            ui.label(RichText::new("导入照片").heading().color(theme::TEXT));
-            // Mode tabs.
+            // Mode tabs (window title already says 导入 — no extra heading).
             ui.horizontal(|ui| {
                 let add_sel = app.import_mode == crate::app::state::ImportMode::Add;
-                if ui.selectable_label(add_sel, "添加模式（从硬盘）").clicked() {
+                if ui.selectable_label(add_sel, t("添加模式（从硬盘）", "Add (from disk)")).clicked() {
                     app.import_mode = crate::app::state::ImportMode::Add;
                 }
-                if ui.selectable_label(!add_sel, "复制模式（从存储卡）").clicked() {
+                if ui.selectable_label(!add_sel, t("复制模式（从存储卡）", "Copy (from card)")).clicked() {
                     app.import_mode = crate::app::state::ImportMode::Copy;
                 }
             });
@@ -124,83 +125,83 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             match app.import_mode {
                 crate::app::state::ImportMode::Add => {
                     ui.label(
-                        RichText::new("添加模式：将已有文件夹的照片添加到图库（仅索引，不拷贝文件）。")
+                        RichText::new(t("添加模式：将已有文件夹的照片添加到图库（仅索引，不拷贝文件）。", "Add mode: index photos from an existing folder on disk (nothing is copied)."))
                             .size(14.0)
                             .color(theme::TEXT_SECONDARY),
                     );
                     ui.add_space(6.0);
-                    ui.label(RichText::new("源路径").size(13.0).color(theme::TEXT_SECONDARY));
+                    ui.label(RichText::new(t("源路径", "Source folder")).size(13.0).color(theme::TEXT_SECONDARY));
                     ui.horizontal(|ui| {
                         let mut path = app.import_path.clone();
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut path)
                                 .desired_width(520.0)
-                                .hint_text("选择或粘贴要添加的文件夹路径"),
+                                .hint_text(t("选择或粘贴要添加的文件夹路径", "Pick or paste a folder to add")),
                         );
                         if resp.changed() {
                             app.import_path = path;
                         }
-                        if ui.button("浏览…").clicked() {
+                        if ui.button(t("浏览…", "Browse…")).clicked() {
                             if let Some(p) = rfd::FileDialog::new().pick_folder() {
                                 app.import_path = p.to_string_lossy().into_owned();
                             }
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut app.import_recursive, "递归扫描子文件夹");
-                        ui.checkbox(&mut app.import_dedup, "去重扫描");
+                        ui.checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"));
+                        ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
                     });
                 }
                 crate::app::state::ImportMode::Copy => {
                     ui.label(
-                        RichText::new("复制模式：从存储卡/文件夹导入，物理拷贝照片到目标目录，保留原文件名。")
+                        RichText::new(t("复制模式：从存储卡/文件夹导入，物理拷贝照片到目标目录，保留原文件名。", "Copy mode: copy photos from a card/folder to the target directory, keeping original filenames."))
                             .size(14.0)
                             .color(theme::TEXT_SECONDARY),
                     );
                     ui.add_space(6.0);
-                    ui.label(RichText::new("源路径").size(13.0).color(theme::TEXT_SECONDARY));
+                    ui.label(RichText::new(t("源路径", "Source folder")).size(13.0).color(theme::TEXT_SECONDARY));
                     ui.horizontal(|ui| {
                         let mut path = app.import_path.clone();
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut path)
                                 .desired_width(480.0)
-                                .hint_text("选择要导入的文件夹/存储卡"),
+                                .hint_text(t("选择要导入的文件夹/存储卡", "Pick the folder / memory card to import")),
                         );
                         if resp.changed() {
                             app.import_path = path;
                         }
-                        if ui.button("浏览…").clicked() {
+                        if ui.button(t("浏览…", "Browse…")).clicked() {
                             if let Some(p) = rfd::FileDialog::new().pick_folder() {
                                 app.import_path = p.to_string_lossy().into_owned();
                             }
                         }
                     });
-                    ui.label(RichText::new("目标目录").size(13.0).color(theme::TEXT_SECONDARY));
+                    ui.label(RichText::new(t("目标目录", "Target folder")).size(13.0).color(theme::TEXT_SECONDARY));
                     ui.horizontal(|ui| {
                         let mut target = app.import_target.clone();
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut target)
                                 .desired_width(430.0)
-                                .hint_text("选择目标目录"),
+                                .hint_text(t("选择目标目录", "Pick the target directory")),
                         );
                         if resp.changed() {
                             app.import_target = target;
                         }
-                        if ui.button("浏览…").clicked() {
+                        if ui.button(t("浏览…", "Browse…")).clicked() {
                             if let Some(p) = rfd::FileDialog::new().pick_folder() {
                                 app.import_target = p.to_string_lossy().into_owned();
                             }
                         }
                     });
-                    ui.label(RichText::new("子目录组织方式").size(13.0).color(theme::TEXT_SECONDARY));
+                    ui.label(RichText::new(t("子目录组织方式", "Subfolder layout")).size(13.0).color(theme::TEXT_SECONDARY));
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Structure, "保持原结构");
-                        ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Date, "按拍摄日期");
-                        ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Flat, "全部平铺");
+                        ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Structure, t("保持原结构", "Keep original structure"));
+                        ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Date, t("按拍摄日期", "By capture date"));
+                        ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Flat, t("全部平铺", "Flat"));
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut app.import_recursive, "递归扫描子文件夹");
-                        ui.checkbox(&mut app.import_dedup, "去重扫描");
+                        ui.checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"));
+                        ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
                     });
                     // 清空存储卡 (PRD 6.3): only enabled when the source is a
                     // removable device; otherwise grayed out and forced off.
@@ -209,10 +210,11 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     if !removable {
                         app.import_clear_card = false;
                     }
-                    let checkbox = egui::Checkbox::new(&mut app.import_clear_card, "导入后清空存储卡");
-                    let resp = ui.add_enabled(removable, checkbox).on_hover_text(
+                    let checkbox = egui::Checkbox::new(&mut app.import_clear_card, t("导入后清空存储卡", "Clear card after import"));
+                    let resp = ui.add_enabled(removable, checkbox).on_hover_text(t(
                         "导入完成且全部成功者会移入回收站（非永久删除）。仅当源路径为可移动存储设备时可用。",
-                    );
+                        "After a fully successful import the copied source files are moved to the recycle bin (not permanently deleted). Only enabled when the source is a removable device.",
+                    ));
                     let _ = resp;
                 }
             }
@@ -222,10 +224,10 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 let p = app.state.import_progress.clone();
                 let frac = if p.total > 0 { p.done as f32 / p.total as f32 } else { 0.0 };
                 let phase_text = match p.phase.as_str() {
-                    "检查" => "正在检查与分析照片…",
-                    "拷贝" => "正在拷贝照片…",
-                    "扫描" => "正在扫描照片…",
-                    "准备" => "正在准备…",
+                    "检查" => t("正在检查与分析照片…", "Checking & analysing photos…"),
+                    "拷贝" => t("正在拷贝照片…", "Copying photos…"),
+                    "扫描" => t("正在扫描照片…", "Scanning photos…"),
+                    "准备" => t("正在准备…", "Preparing…"),
                     other => other,
                 };
                 ui.label(
@@ -240,17 +242,17 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     format!("{}（{}/{}）", p.filename, p.done, p.total)
                 };
                 ui.add(egui::ProgressBar::new(frac).text(bar_text));
-                if ui.button("取消导入").clicked() {
+                if ui.button(t("取消导入", "Cancel import")).clicked() {
                     app.import_cancel.store(true, Ordering::SeqCst);
                 }
             } else {
-                let btn = egui::Button::new(RichText::new("导入").size(15.0).strong().color(egui::Color32::from_rgb(0x12, 0x12, 0x12)))
+                let btn = egui::Button::new(RichText::new(t("导入", "Import")).size(15.0).strong().color(egui::Color32::from_rgb(0x12, 0x12, 0x12)))
                     .fill(theme::ACCENT)
                     .stroke(egui::Stroke::new(1.0, theme::ACCENT));
                 if ui.add(btn).clicked() {
                     let path = app.import_path.clone();
                     if path.trim().is_empty() {
-                        app.toast(ToastKind::Warning, "请选择源路径");
+                        app.toast(ToastKind::Warning, t("请选择源路径", "Pick a source folder first"));
                     } else {
                         match app.import_mode {
                             crate::app::state::ImportMode::Add => {
@@ -258,7 +260,7 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                             }
                             crate::app::state::ImportMode::Copy => {
                                 if app.import_target.trim().is_empty() {
-                                    app.toast(ToastKind::Warning, "请选择目标目录");
+                                    app.toast(ToastKind::Warning, t("请选择目标目录", "Pick a target folder first"));
                                 } else {
                                     let opts = crate::app::copy::CopyOptions {
                                         target_dir: app.import_target.clone(),
@@ -281,24 +283,26 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     Ok(outcome) => {
                         match outcome {
                             crate::app::state::ImportResult::Add(o) => {
-                                ui.label(RichText::new(format!(
-                                    "已将 {} 张照片添加到图库（跳过已存在 {} 张，失败 {} 张，路径修复 {} 条）",
-                                    o.added, o.skipped_existing, o.failed, o.path_repaired
-                                )).size(14.0).color(theme::KEEP));
+                                let msg = match i18n::lang() {
+                                    i18n::Lang::Zh => format!("已将 {} 张照片添加到图库（跳过已存在 {} 张，失败 {} 张，路径修复 {} 条）", o.added, o.skipped_existing, o.failed, o.path_repaired),
+                                    i18n::Lang::En => format!("Added {} photos ({} skipped as existing, {} failed, {} paths repaired)", o.added, o.skipped_existing, o.failed, o.path_repaired),
+                                };
+                                ui.label(RichText::new(msg).size(14.0).color(theme::KEEP));
                                 if !o.failures.is_empty() {
-                                    ui.label(RichText::new("失败列表（前3条）：").size(12.0).color(theme::DELETE));
+                                    ui.label(RichText::new(t("失败列表（前3条）：", "Failures (first 3):")).size(12.0).color(theme::DELETE));
                                     for f in o.failures.iter().take(3) {
                                         ui.label(RichText::new(f).size(12.0).color(theme::TEXT_WEAK));
                                     }
                                 }
                             }
                             crate::app::state::ImportResult::Copy(o) => {
-                                ui.label(RichText::new(format!(
-                                    "成功导入 {} 张（已存在跳过 {} 张，失败 {} 张）",
-                                    o.copied, o.skipped_existing, o.failed
-                                )).size(14.0).color(theme::KEEP));
+                                let msg = match i18n::lang() {
+                                    i18n::Lang::Zh => format!("成功导入 {} 张（已存在跳过 {} 张，失败 {} 张）", o.copied, o.skipped_existing, o.failed),
+                                    i18n::Lang::En => format!("Imported {} photos ({} skipped as existing, {} failed)", o.copied, o.skipped_existing, o.failed),
+                                };
+                                ui.label(RichText::new(msg).size(14.0).color(theme::KEEP));
                                 if !o.failures.is_empty() {
-                                    ui.label(RichText::new("失败列表（前3条）：").size(12.0).color(theme::DELETE));
+                                    ui.label(RichText::new(t("失败列表（前3条）：", "Failures (first 3):")).size(12.0).color(theme::DELETE));
                                     for f in o.failures.iter().take(3) {
                                         ui.label(RichText::new(f).size(12.0).color(theme::TEXT_WEAK));
                                     }
@@ -307,14 +311,14 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         }
                     }
                     Err(e) => {
-                        ui.label(RichText::new(format!("导入失败：{e}")).size(14.0).color(theme::DELETE));
+                        ui.label(RichText::new(format!("{}{e}", t("导入失败：", "Import failed: "))).size(14.0).color(theme::DELETE));
                     }
                 }
-                if ui.button("关闭").clicked() {
+                if ui.button(t("关闭", "Close")).clicked() {
                     app.state.show_import = false;
                 }
             } else {
-                if ui.button("取消").clicked() {
+                if ui.button(t("取消", "Cancel")).clicked() {
                     app.state.show_import = false;
                 }
             }
@@ -336,31 +340,32 @@ fn crash_recovery(app: &mut KakaApp, ctx: &egui::Context) {
         .unwrap_or((0, 0));
 
     dim_backdrop(ctx);
-    egui::Window::new("恢复")
+    egui::Window::new(t("恢复", "Recovery"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .fixed_size([560.0, 340.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            ui.label(RichText::new("检测到上次非正常关闭").size(20.0).strong().color(theme::TEXT));
+            ui.label(RichText::new(t("检测到上次非正常关闭", "Last session did not close properly")).size(20.0).strong().color(theme::TEXT));
             ui.add_space(8.0);
             let folder = state.current_folder_path.clone().unwrap_or_default();
             let (total, processed) = counts;
             ui.label(
-                RichText::new(format!(
-                    "上次工作区：{folder}\n已处理 {processed}/{total} 张。是否恢复上次的标记和浏览位置？"
-                ))
+                RichText::new(match i18n::lang() {
+                    i18n::Lang::Zh => format!("上次工作区：{folder}\n已处理 {processed}/{total} 张。是否恢复上次的标记和浏览位置？"),
+                    i18n::Lang::En => format!("Last workspace: {folder}\n{processed}/{total} processed. Restore your marks and browsing position?"),
+                })
                 .size(14.0)
                 .color(theme::TEXT_SECONDARY),
             );
             ui.add_space(6.0);
-            ui.label(RichText::new("崩溃不会删除照片文件，仅可能丢失未保存的筛选标记。").size(12.0).color(theme::TEXT_WEAK));
+            ui.label(RichText::new(t("崩溃不会删除照片文件，仅可能丢失未保存的筛选标记。", "A crash never deletes photo files — only unsaved culling marks may be lost.")).size(12.0).color(theme::TEXT_WEAK));
             ui.add_space(10.0);
 
             let mut close = false;
             ui.horizontal(|ui| {
-                if ui.add(primary_button("恢复并继续")).clicked() {
+                if ui.add(primary_button(t("恢复并继续", "Resume where I left off"))).clicked() {
                     // Restore saved position.
                     if let Some(folder) = state.current_folder_path.clone() {
                         let sort = SortOrder::from_code(&state.current_sort);
@@ -370,7 +375,7 @@ fn crash_recovery(app: &mut KakaApp, ctx: &egui::Context) {
                     app.settle_crash_recovery();
                     close = true;
                 }
-                if ui.button("保留标记，从头浏览").clicked() {
+                if ui.button(t("保留标记，从头浏览", "Keep marks, browse from start")).clicked() {
                     if let Some(folder) = state.current_folder_path.clone() {
                         let sort = SortOrder::from_code(&state.current_sort);
                         let _ = app.state.open_workspace(&folder, sort);
@@ -379,7 +384,7 @@ fn crash_recovery(app: &mut KakaApp, ctx: &egui::Context) {
                     app.settle_crash_recovery();
                     close = true;
                 }
-                if ui.button(RichText::new("放弃所有未保存的标记，重置为未处理").color(theme::DELETE)).clicked() {
+                if ui.button(RichText::new(t("放弃所有未保存的标记，重置为未处理", "Discard all unsaved marks (reset to unprocessed)")).color(theme::DELETE)).clicked() {
                     // Reset all statuses in the last workspace to 0.
                     if let Some(folder) = state.current_folder_path.clone() {
                         if let Ok(ids) = db::photos::list_ids_in_folder(&app.state.db, &folder, SortOrder::CaptureTimeAsc) {
@@ -402,117 +407,211 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     // Edit a draft; only "保存" applies it to the live config and persists it.
     let mut save = false;
     dim_backdrop(ctx);
-    egui::Window::new("设置")
+    egui::Window::new(t("设置", "Settings"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([720.0, 520.0])
+        .fixed_size([720.0, 540.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            ui.label(RichText::new("设置").heading().color(theme::TEXT));
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.label(RichText::new("常规").size(13.0).color(theme::ACCENT).strong());
-                ui.checkbox(&mut app.settings_draft.auto_open_last_workspace, "自动打开上次工作区");
-                ui.checkbox(&mut app.settings_draft.auto_detect_card, "自动检测存储卡（SD 热插拔）");
-                ui.checkbox(&mut app.settings_draft.dim_reviewed_thumbnails, "缩略图淡化已阅跳过");
-                ui.checkbox(&mut app.settings_draft.batch_confirm, "批量操作二次确认");
-                ui.checkbox(&mut app.settings_draft.show_clipping_warning, "显示高光/暗部溢出提示");
-                ui.checkbox(&mut app.settings_draft.high_dpi_2x, "高 DPI 2x 缩略图");
-                ui.add_space(6.0);
-                ui.label(RichText::new("路径与标记").size(13.0).color(theme::ACCENT).strong());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("默认目标/导出目录").size(13.0).color(theme::TEXT_WEAK));
-                    let mut d = app.settings_draft.default_target_dir.clone();
-                    if ui.add(egui::TextEdit::singleline(&mut d).desired_width(360.0).hint_text("留空则每询问")).changed() {
-                        app.settings_draft.default_target_dir = d;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("XMP 星级").size(13.0).color(theme::TEXT_WEAK));
-                    let mut r = app.settings_draft.star_rating;
-                    if ui.add(egui::DragValue::new(&mut r).range(0..=5).speed(1)).changed() {
-                        app.settings_draft.star_rating = r;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Lightroom 目录").size(13.0).color(theme::TEXT_WEAK));
-                    let mut lr = app.settings_draft.lr_install_path.clone();
-                    if ui.add(
-                        egui::TextEdit::singleline(&mut lr)
-                            .desired_width(360.0)
-                            .hint_text("Lightroom.exe 路径或所在目录，留空自动检测"),
-                    )
-                    .changed()
-                    {
-                        app.settings_draft.lr_install_path = lr;
-                    }
-                    if ui.button("浏览…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
-                            app.settings_draft.lr_install_path = p.to_string_lossy().into_owned();
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-                // 缓存管理 (PRD 5.3.3 / 9.4).
-                ui.label(RichText::new("缓存").size(13.0).color(theme::ACCENT).strong());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("容量上限").size(13.0).color(theme::TEXT_WEAK));
-                    let mut cap = app.settings_draft.cache_capacity_gb as i64;
-                    if ui.add(egui::Slider::new(&mut cap, 2..=100).suffix(" GB")).changed() {
-                        app.settings_draft.cache_capacity_gb = cap.max(2) as u64;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("过期天数").size(13.0).color(theme::TEXT_WEAK));
-                    let mut days = app.settings_draft.cache_expire_days as i64;
-                    if ui.add(egui::DragValue::new(&mut days).range(7..=365).suffix(" 天")).changed() {
-                        app.settings_draft.cache_expire_days = days.max(7) as u64;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if app.cache_clean_running {
-                        let n = app.cache_clean_progress.load(Ordering::SeqCst);
-                        ui.label(
-                            RichText::new(format!("清理中… 已删除 {n} 个文件"))
-                                .size(13.0)
-                                .color(theme::ACCENT),
-                        );
-                    } else if ui.button("立即清理全部过期与超限缓存").clicked() {
-                        app.start_cache_clean(usize::MAX, true);
-                    }
-                    if ui.button("打开缓存文件夹").clicked() {
-                        let _ = std::process::Command::new("explorer")
-                            .arg(crate::paths::cache_dir().to_string_lossy().into_owned())
-                            .spawn();
-                    }
-                });
-                ui.add_space(8.0);
-                ui.label(RichText::new("关于").size(13.0).color(theme::ACCENT).strong());
-                ui.label(RichText::new(format!("咔咔 v{}（M4）", env!("CARGO_PKG_VERSION"))).size(14.0).color(theme::TEXT));
-                ui.label(RichText::new("开源 · 无自动更新 · Windows x86_64").size(12.0).color(theme::TEXT_WEAK));
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("保存").clicked() {
+            // Action row pinned above the scroll area — 保存/取消 never scroll away.
+            // (wrapped in horizontal so the row takes one line, not the whole
+            // remaining window rect, which would push the content out of view)
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(primary_button(t("保存", "Save"))).clicked() {
                         save = true;
                         app.state.show_settings = false;
                     }
-                    if ui.button("取消").clicked() {
+                    if ui.button(t("取消", "Cancel")).clicked() {
                         // Discard draft, keep existing config.
                         app.state.show_settings = false;
                     }
                 });
             });
+            ui.separator();
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                section(ui, t("常规", "General"));
+                egui::Grid::new("set_general")
+                    .num_columns(2)
+                    .spacing([16.0, 7.0])
+                    .show(ui, |ui| {
+                        let d = &mut app.settings_draft;
+                        ui.checkbox(&mut d.auto_open_last_workspace, t("自动打开上次工作区", "Reopen last workspace on startup"));
+                        ui.end_row();
+                        ui.checkbox(&mut d.auto_detect_card, t("自动检测存储卡（SD 热插拔）", "Auto-detect memory cards (SD hot-plug)"));
+                        ui.end_row();
+                        ui.checkbox(&mut d.dim_reviewed_thumbnails, t("缩略图淡化已阅跳过", "Dim reviewed thumbnails"));
+                        ui.end_row();
+                        ui.checkbox(&mut d.batch_confirm, t("批量操作二次确认", "Confirm batch operations"));
+                        ui.end_row();
+                        ui.checkbox(&mut d.show_clipping_warning, t("显示高光/暗部溢出提示", "Show highlight/shadow clipping hints"));
+                        ui.end_row();
+                        ui.checkbox(&mut d.high_dpi_2x, t("高 DPI 2x 缩略图", "High-DPI @2x thumbnails"));
+                        ui.end_row();
+                        ui.label(RichText::new(t("语言", "Language")).size(13.0).color(theme::TEXT_WEAK));
+                        let mut lang = i18n::Lang::from_code(&d.language);
+                        egui::ComboBox::from_id_salt("set_language")
+                            .selected_text(lang.native_label())
+                            .width(160.0)
+                            .show_ui(ui, |ui| {
+                                for l in [i18n::Lang::Zh, i18n::Lang::En] {
+                                    ui.selectable_value(&mut lang, l, l.native_label());
+                                }
+                            });
+                        d.language = lang.code().to_string();
+                        ui.end_row();
+                    });
+
+                section(ui, t("路径与标记", "Paths & Marks"));
+                egui::Grid::new("set_paths")
+                    .num_columns(2)
+                    .spacing([16.0, 7.0])
+                    .show(ui, |ui| {
+                        let d = &mut app.settings_draft;
+                        ui.label(RichText::new(t("默认目标/导出目录", "Default target/export folder")).size(13.0).color(theme::TEXT_WEAK));
+                        let mut dir = d.default_target_dir.clone();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut dir)
+                                    .desired_width(340.0)
+                                    .hint_text(t("留空则每询问", "Leave empty to ask every time")),
+                            )
+                            .changed()
+                        {
+                            d.default_target_dir = dir;
+                        }
+                        ui.end_row();
+                        ui.label(RichText::new(t("XMP 星级", "XMP star rating")).size(13.0).color(theme::TEXT_WEAK));
+                        let mut r = d.star_rating;
+                        ui.add(egui::DragValue::new(&mut r).range(0..=5).speed(1));
+                        d.star_rating = r;
+                        ui.end_row();
+                        ui.label(RichText::new(t("Lightroom 目录", "Lightroom folder")).size(13.0).color(theme::TEXT_WEAK));
+                        ui.horizontal(|ui| {
+                            let mut lr = d.lr_install_path.clone();
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut lr)
+                                        .desired_width(290.0)
+                                        .hint_text(t("Lightroom.exe 路径或所在目录，留空自动检测", "Path to (or folder of) Lightroom.exe; empty = auto-detect")),
+                                )
+                                .changed()
+                            {
+                                d.lr_install_path = lr;
+                            }
+                            if ui.button(t("浏览…", "Browse…")).clicked() {
+                                if let Some(p) = rfd::FileDialog::new().pick_file() {
+                                    d.lr_install_path = p.to_string_lossy().into_owned();
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    });
+
+                section(ui, t("缓存", "Cache"));
+                egui::Grid::new("set_cache")
+                    .num_columns(2)
+                    .spacing([16.0, 7.0])
+                    .show(ui, |ui| {
+                        let d = &mut app.settings_draft;
+                        ui.label(RichText::new(t("容量上限", "Capacity limit")).size(13.0).color(theme::TEXT_WEAK));
+                        let mut cap = d.cache_capacity_gb as i64;
+                        if ui.add(egui::Slider::new(&mut cap, 2..=100).suffix(" GB")).changed() {
+                            d.cache_capacity_gb = cap.max(2) as u64;
+                        }
+                        ui.end_row();
+                        ui.label(RichText::new(t("过期天数", "Expire after (days)")).size(13.0).color(theme::TEXT_WEAK));
+                        let mut days = d.cache_expire_days as i64;
+                        if ui.add(egui::DragValue::new(&mut days).range(7..=365).suffix(t(" 天", " days"))).changed() {
+                            d.cache_expire_days = days.max(7) as u64;
+                        }
+                        ui.end_row();
+                    });
+                ui.horizontal(|ui| {
+                    if let Some((bytes, files)) = app.cache_usage {
+                        let msg = match i18n::lang() {
+                            i18n::Lang::Zh => format!(
+                                "当前缓存占用 {}（{} 个文件）",
+                                crate::app::copy::human_bytes(bytes),
+                                files
+                            ),
+                            i18n::Lang::En => format!(
+                                "Cache in use {} ({} files)",
+                                crate::app::copy::human_bytes(bytes),
+                                files
+                            ),
+                        };
+                        ui.label(RichText::new(msg).size(12.0).color(theme::TEXT_WEAK));
+                    }
+                    if app.cache_clean_running {
+                        let n = app.cache_clean_progress.load(Ordering::SeqCst);
+                        ui.label(
+                            RichText::new(format!("{} {n}", t("清理中… 已删除", "Cleaning… deleted")))
+                                .size(13.0)
+                                .color(theme::ACCENT),
+                        );
+                    } else if ui
+                        .button(t("立即清理全部过期与超限缓存", "Clean all expired & over-capacity cache now"))
+                        .clicked()
+                    {
+                        app.start_cache_clean(usize::MAX, true);
+                    }
+                    if ui.button(t("打开缓存文件夹", "Open cache folder")).clicked() {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(crate::paths::cache_dir().to_string_lossy().into_owned())
+                            .spawn();
+                    }
+                });
+
+                section(ui, t("关于", "About"));
+                ui.label(
+                    RichText::new(format!("咔咔 Kaka v{}", env!("CARGO_PKG_VERSION")))
+                        .size(14.0)
+                        .color(theme::TEXT),
+                );
+                ui.label(
+                    RichText::new(t("开源 · 无自动更新 · Windows x86_64", "Open source · no auto-update · Windows x86_64"))
+                        .size(12.0)
+                        .color(theme::TEXT_WEAK),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button(t("打开 GitHub 仓库", "Open GitHub repository")).clicked() {
+                        open_url(&app.state.config.github_repo);
+                    }
+                    if ui.button(t("打开日志文件夹", "Open log folder")).clicked() {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(crate::paths::logs_dir().to_string_lossy().into_owned())
+                            .spawn();
+                    }
+                });
+            });
         });
     if save {
-        // Apply draft to live config + persist.
+        // Apply draft to live config + persist + switch the UI language.
         app.state.config = app.settings_draft.clone();
+        i18n::set_lang(i18n::Lang::from_code(&app.state.config.language));
         if let Err(e) = crate::config::save(&app.state.config) {
-            app.toast(ToastKind::Error, format!("设置保存失败：{e}"));
+            app.toast(ToastKind::Error, format!("{}{e}", t("设置保存失败：", "Failed to save settings: ")));
         } else {
-            app.toast(ToastKind::Success, "设置已保存");
+            app.toast(ToastKind::Success, t("设置已保存", "Settings saved"));
         }
     }
+}
+
+/// A settings section heading with a little breathing room.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(title).size(13.0).color(theme::ACCENT).strong());
+    ui.separator();
+}
+
+/// Open a URL / folder in the system handler (Windows).
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn();
 }
 
 fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
@@ -529,7 +628,7 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
         .fixed_size([620.0, 560.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            ui.label(RichText::new("高级过滤（可叠加，条件为 AND 关系）").heading().color(theme::TEXT));
+            ui.label(RichText::new(t("高级过滤（可叠加，条件为 AND 关系）", "Advanced filter (stackable, all AND)")).heading().color(theme::TEXT));
             ui.add_space(6.0);
 
             let mut apply = false;
@@ -538,24 +637,24 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // 状态.
-                section_heading(ui, "状态");
+                section_heading(ui, t("状态", "Status"));
                 ui.horizontal(|ui| {
-                    for (id, label) in [(0i64, "未处理"), (1, "待删"), (2, "已阅")] {
+                    for (id, label) in [(0i64, t("未处理", "Untreated")), (1, t("待删", "To delete")), (2, t("已阅", "Reviewed"))] {
                         let mut on = app.filter_draft.statuses.contains(&id);
                         if ui.checkbox(&mut on, label).changed() {
                             toggle_in(&mut app.filter_draft.statuses, id);
                         }
                     }
-                    if ui.button("全部").clicked() {
+                    if ui.button(t("全部", "All")).clicked() {
                         app.filter_draft.statuses.clear();
                     }
                 });
 
                 // 相机 / 镜头.
-                section_heading(ui, "相机型号");
+                section_heading(ui, t("相机型号", "Camera model"));
                 ui.horizontal_wrapped(|ui| {
                     if cameras.is_empty() {
-                        ui.label(RichText::new("（无）").color(theme::TEXT_WEAK));
+                        ui.label(RichText::new(t("（无）", "(none)")).color(theme::TEXT_WEAK));
                     }
                     for cam in &cameras {
                         let mut on = app.filter_draft.cameras.contains(cam);
@@ -564,10 +663,10 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         }
                     }
                 });
-                section_heading(ui, "镜头型号");
+                section_heading(ui, t("镜头型号", "Lens model"));
                 ui.horizontal_wrapped(|ui| {
                     if lenses.is_empty() {
-                        ui.label(RichText::new("（无）").color(theme::TEXT_WEAK));
+                        ui.label(RichText::new(t("（无）", "(none)")).color(theme::TEXT_WEAK));
                     }
                     for lens in &lenses {
                         let mut on = app.filter_draft.lenses.contains(lens);
@@ -578,7 +677,7 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 });
 
                 // ISO / 焦距.
-                section_heading(ui, "ISO 范围");
+                section_heading(ui, t("ISO 范围", "ISO range"));
                 ui.horizontal(|ui| {
                     let mut mn = app.filter_draft.iso_min.unwrap_or(0);
                     let mut mx = app.filter_draft.iso_max.unwrap_or(0);
@@ -590,12 +689,12 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     if ui.add(egui::DragValue::new(&mut mx).range(0..=102400).speed(50)).changed() {
                         app.filter_draft.iso_max = Some(mx);
                     }
-                    if ui.button("清除").clicked() {
+                    if ui.button(t("清除", "Clear")).clicked() {
                         app.filter_draft.iso_min = None;
                         app.filter_draft.iso_max = None;
                     }
                 });
-                section_heading(ui, "焦距范围 (mm)");
+                section_heading(ui, t("焦距范围 (mm)", "Focal range (mm)"));
                 ui.horizontal(|ui| {
                     let mut mn = app.filter_draft.focal_min.unwrap_or(0);
                     let mut mx = app.filter_draft.focal_max.unwrap_or(0);
@@ -607,22 +706,22 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     if ui.add(egui::DragValue::new(&mut mx).range(0..=2000).speed(1)).changed() {
                         app.filter_draft.focal_max = Some(mx);
                     }
-                    if ui.button("清除").clicked() {
+                    if ui.button(t("清除", "Clear")).clicked() {
                         app.filter_draft.focal_min = None;
                         app.filter_draft.focal_max = None;
                     }
                 });
 
                 // 日期范围.
-                section_heading(ui, "拍摄日期范围");
+                section_heading(ui, t("拍摄日期范围", "Capture date range"));
                 ui.horizontal(|ui| {
                     let mut df = app.filter_draft.date_from.clone().unwrap_or_default();
                     let mut dt = app.filter_draft.date_to.clone().unwrap_or_default();
-                    ui.label(RichText::new("从").color(theme::TEXT_WEAK));
+                    ui.label(RichText::new(t("从", "From")).color(theme::TEXT_WEAK));
                     if ui.add(egui::TextEdit::singleline(&mut df).hint_text("YYYY-MM-DD").desired_width(110.0)).changed() {
                         app.filter_draft.date_from = if df.trim().is_empty() { None } else { Some(df.trim().to_string()) };
                     }
-                    ui.label(RichText::new("到").color(theme::TEXT_WEAK));
+                    ui.label(RichText::new(t("到", "To")).color(theme::TEXT_WEAK));
                     if ui.add(egui::TextEdit::singleline(&mut dt).hint_text("YYYY-MM-DD").desired_width(110.0)).changed() {
                         app.filter_draft.date_to = if dt.trim().is_empty() { None } else { Some(dt.trim().to_string()) };
                     }
@@ -630,7 +729,7 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 });
 
                 // 文件格式.
-                section_heading(ui, "文件格式");
+                section_heading(ui, t("文件格式", "File format"));
                 ui.horizontal_wrapped(|ui| {
                     for f in &formats {
                         let mut on = app.filter_draft.formats.contains(f);
@@ -641,32 +740,32 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 });
 
                 // 是否丢失 / 配对.
-                section_heading(ui, "文件状态");
+                section_heading(ui, t("文件状态", "File state"));
                 ui.horizontal(|ui| {
                     let mut missing = app.filter_draft.missing;
-                    radio_opt(ui, &mut missing, None, "全部");
-                    radio_opt(ui, &mut missing, Some(true), "仅丢失");
-                    radio_opt(ui, &mut missing, Some(false), "不包含丢失");
+                    radio_opt(ui, &mut missing, None, t("全部", "All"));
+                    radio_opt(ui, &mut missing, Some(true), t("仅丢失", "Missing only"));
+                    radio_opt(ui, &mut missing, Some(false), t("不包含丢失", "Existing only"));
                     app.filter_draft.missing = missing;
                 });
                 ui.horizontal(|ui| {
                     let mut pair = app.filter_draft.pair;
-                    radio_opt(ui, &mut pair, None, "全部");
-                    radio_opt(ui, &mut pair, Some(true), "仅配对");
-                    radio_opt(ui, &mut pair, Some(false), "仅单文件");
+                    radio_opt(ui, &mut pair, None, t("全部", "All"));
+                    radio_opt(ui, &mut pair, Some(true), t("仅配对", "Paired only"));
+                    radio_opt(ui, &mut pair, Some(false), t("仅单文件", "Singles only"));
                     app.filter_draft.pair = pair;
                 });
             });
 
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.add(primary_button("应用")).clicked() {
+                if ui.add(primary_button(t("应用", "Apply"))).clicked() {
                     apply = true;
                 }
-                if ui.button("清除过滤").clicked() {
+                if ui.button(t("清除过滤", "Clear filters")).clicked() {
                     clear = true;
                 }
-                if ui.button("取消").clicked() {
+                if ui.button(t("取消", "Cancel")).clicked() {
                     cancel = true;
                 }
             });
@@ -680,7 +779,7 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 app.state.ws.filter = crate::model::Filter::default();
                 let _ = app.state.reload_current();
                 app.state.show_filter = false;
-                app.toast(ToastKind::Info, "已清除过滤条件");
+                app.toast(ToastKind::Info, t("已清除过滤条件", "Filters cleared"));
             }
             if cancel {
                 app.state.show_filter = false;
@@ -726,11 +825,11 @@ fn quick_date(ui: &mut egui::Ui, f: &mut crate::model::Filter) {
             f.date_to = Some(to.format("%Y-%m-%d").to_string());
         }
     };
-    push(ui, "今日", today, today);
-    push(ui, "昨日", today - chrono::Duration::days(1), today - chrono::Duration::days(1));
-    push(ui, "近7天", today - chrono::Duration::days(6), today);
-    push(ui, "本月", month_start, today);
-    push(ui, "上月", prev_month_start, prev_month_end);
+    push(ui, t("今日", "Today"), today, today);
+    push(ui, t("昨日", "Yesterday"), today - chrono::Duration::days(1), today - chrono::Duration::days(1));
+    push(ui, t("近7天", "Last 7 days"), today - chrono::Duration::days(6), today);
+    push(ui, t("本月", "This month"), month_start, today);
+    push(ui, t("上月", "Last month"), prev_month_start, prev_month_end);
 }
 
 fn common_formats(items: &[crate::model::PhotoListItem]) -> Vec<String> {
@@ -757,7 +856,7 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     let mut lr_send = false;
 
     dim_backdrop(ctx);
-    egui::Window::new("导出")
+    egui::Window::new(t("导出", "Export"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -765,61 +864,61 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
         .frame(dialog_frame())
         .show(ctx, |ui| {
             ui.label(RichText::new("导出").heading().color(theme::TEXT));
-            ui.label(RichText::new("仅导出「保留」照片（未标记待删），不改动源文件与数据库。")
+            ui.label(RichText::new(t("仅导出「保留」照片（未标记待删），不改动源文件与数据库。", "Exports only kept photos (not marked for deletion); never touches source files or the database."))
                 .size(13.0).color(theme::TEXT_SECONDARY));
             ui.separator();
 
             // 12.1 复制保留照片到目录.
-            ui.label(RichText::new("方式一：复制保留照片到指定目录").size(14.0).color(theme::ACCENT).strong());
+            ui.label(RichText::new(t("方式一：复制保留照片到指定目录", "1. Copy kept photos to a folder")).size(14.0).color(theme::ACCENT).strong());
             ui.horizontal(|ui| {
                 let mut target = app.export_target.clone();
                 if ui.add(egui::TextEdit::singleline(&mut target).desired_width(430.0).hint_text("目标导出目录")).changed() {
                     app.export_target = target;
                 }
-                if ui.button("浏览…").clicked() {
+                if ui.button(t("浏览…", "Browse…")).clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         app.export_target = p.to_string_lossy().into_owned();
                     }
                 }
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("组织方式").size(12.0).color(theme::TEXT_WEAK));
-                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Structure, "保持原结构");
-                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Date, "按拍摄日期");
-                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Flat, "全部平铺");
+                ui.label(RichText::new(t("组织方式", "Layout")).size(12.0).color(theme::TEXT_WEAK));
+                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Structure, t("保持原结构", "Keep original structure"));
+                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Date, t("按拍摄日期", "By capture date"));
+                ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Flat, t("全部平铺", "Flat"));
             });
-            if ui.button("开始导出复制").clicked() {
+            if ui.button(t("开始导出复制", "Start copy export")).clicked() {
                 copy_clicked = true;
             }
 
             ui.add_space(8.0);
             ui.separator();
-            ui.label(RichText::new("方式二：生成保留照片文件列表").size(14.0).color(theme::ACCENT).strong());
-            if ui.button("导出 .txt / .csv 列表").clicked() {
+            ui.label(RichText::new(t("方式二：生成保留照片文件列表", "2. Export a kept-photo file list")).size(14.0).color(theme::ACCENT).strong());
+            if ui.button(t("导出 .txt / .csv 列表", "Export .txt / .csv list")).clicked() {
                 list_clicked = true;
             }
 
             ui.add_space(8.0);
             ui.separator();
-            ui.label(RichText::new("方式三：写入 XMP 侧车标记（Kaka:Keep + 星级）").size(14.0).color(theme::ACCENT).strong());
-            if ui.button("写入 XMP 标记").clicked() {
+            ui.label(RichText::new(t("方式三：写入 XMP 侧车标记（Kaka:Keep + 星级）", "3. Write XMP sidecar marks (Kaka:Keep + rating)")).size(14.0).color(theme::ACCENT).strong());
+            if ui.button(t("写入 XMP 标记", "Write XMP marks")).clicked() {
                 xmp_clicked = true;
             }
 
             ui.add_space(8.0);
             ui.separator();
-            ui.label(RichText::new("方式四：发送到 Lightroom 经典版").size(14.0).color(theme::ACCENT).strong());
+            ui.label(RichText::new(t("方式四：发送到 Lightroom 经典版", "4. Send to Lightroom Classic")).size(14.0).color(theme::ACCENT).strong());
             let lr_found = app.lr_path.is_some();
-            let send_btn = egui::Button::new(RichText::new("发送到 Lightroom").color(theme::TEXT));
+            let send_btn = egui::Button::new(RichText::new(t("发送到 Lightroom", "Send to Lightroom")).color(theme::TEXT));
             if ui.add_enabled(lr_found, send_btn)
-                .on_hover_text(if lr_found { "将保留照片发送给 Lightroom 导入" } else { "未检测到 Lightroom 经典版" })
+                .on_hover_text(if lr_found { t("将保留照片发送给 Lightroom 导入", "Send kept photos to Lightroom for import") } else { t("未检测到 Lightroom 经典版", "Lightroom Classic not detected") })
                 .clicked()
             {
                 lr_send = true;
             }
 
             ui.separator();
-            if ui.button("关闭").clicked() {
+            if ui.button(t("关闭", "Close")).clicked() {
                 app.state.show_export = false;
             }
         });
@@ -828,7 +927,7 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     if copy_clicked {
         let target = app.export_target.trim().to_string();
         if target.is_empty() {
-            app.toast(ToastKind::Warning, "请先选择导出目录");
+            app.toast(ToastKind::Warning, t("请先选择导出目录", "Pick an export folder first"));
         } else {
             let mut progress = |_d: usize, _t: usize| -> bool { true };
             match crate::app::export::export_kept_copy(
@@ -841,13 +940,14 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 &mut progress,
             ) {
                 Ok(out) => {
-                    app.toast(
-                        ToastKind::Success,
-                        format!("导出完成：成功 {} 张 / 失败 {} 张", out.copied, out.failed),
-                    );
-                    app.toast(ToastKind::Info, format!("已导出到：{target}"));
+                    let msg = match i18n::lang() {
+                        i18n::Lang::Zh => format!("导出完成：成功 {} 张 / 失败 {} 张", out.copied, out.failed),
+                        i18n::Lang::En => format!("Export finished: {} copied, {} failed", out.copied, out.failed),
+                    };
+                    app.toast(ToastKind::Success, msg);
+                    app.toast(ToastKind::Info, format!("{}{target}", t("已导出到：", "Exported to: ")));
                 }
-                Err(e) => app.toast(ToastKind::Error, format!("导出失败：{e}")),
+                Err(e) => app.toast(ToastKind::Error, format!("{}{e}", t("导出失败：", "Export failed: "))),
             }
             app.state.show_export = false;
         }
@@ -865,8 +965,14 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 crate::app::export::ExportFileFormat::Csv
             };
             match crate::app::export::export_file_list(&app.state.db, &folder, &path.to_string_lossy(), format) {
-                Ok(n) => app.toast(ToastKind::Success, format!("已导出 {n} 张列表到：{}", path.display())),
-                Err(e) => app.toast(ToastKind::Error, format!("导出列表失败：{e}")),
+                Ok(n) => {
+                    let msg = match i18n::lang() {
+                        i18n::Lang::Zh => format!("已导出 {n} 张列表到：{}", path.display()),
+                        i18n::Lang::En => format!("Exported {n} entries to: {}", path.display()),
+                    };
+                    app.toast(ToastKind::Success, msg)
+                }
+                Err(e) => app.toast(ToastKind::Error, format!("{}{e}", t("导出列表失败：", "List export failed: "))),
             }
             app.state.show_export = false;
         }
@@ -874,16 +980,28 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     if xmp_clicked {
         let rating = app.state.config.star_rating;
         match crate::app::export::write_xmp_sidecars(&app.state.db, &folder, rating) {
-            Ok(n) => app.toast(ToastKind::Success, format!("已为 {n} 张保留照片写入 XMP 标记")),
-            Err(e) => app.toast(ToastKind::Error, format!("写入 XMP 失败：{e}")),
+            Ok(n) => {
+                    let msg = match i18n::lang() {
+                        i18n::Lang::Zh => format!("已为 {n} 张保留照片写入 XMP 标记"),
+                        i18n::Lang::En => format!("Wrote XMP marks for {n} kept photos"),
+                    };
+                    app.toast(ToastKind::Success, msg)
+                }
+            Err(e) => app.toast(ToastKind::Error, format!("{}{e}", t("写入 XMP 失败：", "XMP write failed: "))),
         }
         app.state.show_export = false;
     }
     if lr_send {
         if let Some(exe) = app.lr_path.clone() {
             match crate::app::export::send_to_lightroom(&app.state.db, &folder, &exe) {
-                Ok(n) => app.toast(ToastKind::Success, format!("已发送 {n} 张保留照片到 Lightroom")),
-                Err(e) => app.toast(ToastKind::Error, format!("发送到 Lightroom 失败：{e}")),
+                Ok(n) => {
+                    let msg = match i18n::lang() {
+                        i18n::Lang::Zh => format!("已发送 {n} 张保留照片到 Lightroom"),
+                        i18n::Lang::En => format!("Sent {n} kept photos to Lightroom"),
+                    };
+                    app.toast(ToastKind::Success, msg)
+                }
+                Err(e) => app.toast(ToastKind::Error, format!("{}{e}", t("发送到 Lightroom 失败：", "Send to Lightroom failed: "))),
             }
             app.state.show_export = false;
         }
@@ -899,20 +1017,24 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
 
     dim_backdrop(ctx);
     let mut recycle = false;
-    egui::Window::new("待删照片")
+    egui::Window::new(t("待删照片", "Photos to delete"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .fixed_size([760.0, 520.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            ui.label(RichText::new(format!("待删照片（{}张）", deleted.len())).heading().color(theme::TEXT));
-            ui.label(RichText::new("最终删除会把这些照片文件移入回收站（可从回收站恢复），并清除数据库记录。")
+            let title = match i18n::lang() {
+                i18n::Lang::Zh => format!("待删照片（{}张）", deleted.len()),
+                i18n::Lang::En => format!("Photos to delete ({})", deleted.len()),
+            };
+            ui.label(RichText::new(title).heading().color(theme::TEXT));
+            ui.label(RichText::new(t("最终删除会把这些照片文件移入回收站（可从回收站恢复），并清除数据库记录。", "Final deletion moves these files to the recycle bin (recoverable there) and removes their database records."))
                 .size(12.0).color(theme::TEXT_WEAK));
             ui.separator();
             if deleted.is_empty() {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("暂无待删照片").color(theme::TEXT_WEAK));
+                    ui.label(RichText::new(t("暂无待删照片", "Nothing marked for deletion")).color(theme::TEXT_WEAK));
                 });
             } else {
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -929,7 +1051,7 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
                 if n > 0 {
                     // Restore only the marked photos.
                     if ui
-                        .add(egui::Button::new(RichText::new(format!("全部恢复（{n}）")).color(theme::KEEP)))
+                        .add(egui::Button::new(RichText::new(format!("{} ({n})", t("全部恢复", "Restore all"))).color(theme::KEEP)))
                         .clicked()
                     {
                         let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
@@ -940,14 +1062,14 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
                     // Final delete: move files to the recycle bin + clear DB records.
                     if ui
                         .add(egui::Button::new(
-                            RichText::new(format!("全部移入回收站（{n}）")).strong().color(egui::Color32::WHITE),
+                            RichText::new(format!("{} ({n})", t("全部移入回收站", "Move all to recycle bin"))).strong().color(egui::Color32::WHITE),
                         ).fill(theme::DELETE).stroke(egui::Stroke::new(1.0, theme::DELETE)))
                         .clicked()
                     {
                         recycle = true;
                     }
                 }
-                if ui.button("关闭").clicked() {
+                if ui.button(t("关闭", "Close")).clicked() {
                     app.state.show_delete_box = false;
                 }
             });
@@ -959,9 +1081,12 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
         let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
         let n = paths.len();
         app.confirm = Some(ConfirmDialog {
-            title: "移入回收站".into(),
-            text: format!("确认将 {n} 张照片及其文件移入回收站？此操作可从回收站恢复，并会清除数据库记录。"),
-            confirm_label: "移入回收站".into(),
+            title: t("移入回收站", "Move to recycle bin").into(),
+            text: match i18n::lang() {
+                i18n::Lang::Zh => format!("确认将 {n} 张照片及其文件移入回收站？此操作可从回收站恢复，并会清除数据库记录。"),
+                i18n::Lang::En => format!("Move {n} photos and their files to the recycle bin? They can be restored from there; database records will be removed."),
+            },
+            confirm_label: t("移入回收站", "Recycle").into(),
             danger: true,
             on_confirm: Box::new(move |app| {
                 let ok = crate::io::recycle::move_to_recycle_bin(&paths).is_ok();
@@ -971,9 +1096,13 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
                 let _ = app.state.reload_current();
                 app.state.show_delete_box = false;
                 if ok {
-                    app.toast(ToastKind::Success, format!("已将 {n} 张照片移入回收站"));
+                    let msg = match i18n::lang() {
+                        i18n::Lang::Zh => format!("已将 {n} 张照片移入回收站"),
+                        i18n::Lang::En => format!("Moved {n} photos to the recycle bin"),
+                    };
+                    app.toast(ToastKind::Success, msg);
                 } else {
-                    app.toast(ToastKind::Error, "部分照片移入回收站失败，请检查回收站状态");
+                    app.toast(ToastKind::Error, t("部分照片移入回收站失败，请检查回收站状态", "Some files failed to move to the recycle bin"));
                 }
                 app.needs_save = true;
             }),
@@ -990,7 +1119,7 @@ fn confirm_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     let danger = c.danger;
     let mut confirm_clicked = false;
     let mut cancel_clicked = false;
-    egui::Window::new("确认")
+    egui::Window::new(t("确认", "Confirm"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1014,7 +1143,7 @@ fn confirm_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 if ui.add(btn).clicked() {
                     confirm_clicked = true;
                 }
-                if ui.button("取消").clicked() {
+                if ui.button(t("取消", "Cancel")).clicked() {
                     cancel_clicked = true;
                 }
             });

@@ -36,7 +36,11 @@ pub fn move_to_recycle_bin(paths: &[PathBuf]) -> anyhow::Result<()> {
     if ret == 0 {
         Ok(())
     } else {
-        anyhow::bail!("移入回收站失败（错误码 {ret}）")
+        let msg = match crate::i18n::lang() {
+            crate::i18n::Lang::Zh => format!("移入回收站失败（错误码 {ret}）"),
+            crate::i18n::Lang::En => format!("Move to recycle bin failed (error code {ret})"),
+        };
+        anyhow::bail!("{msg}")
     }
 }
 

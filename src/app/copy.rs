@@ -23,12 +23,13 @@ pub enum OrgMode {
 }
 
 impl OrgMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            OrgMode::Structure => "保持原结构",
-            OrgMode::Date => "按拍摄日期建子文件夹",
-            OrgMode::Flat => "全部平铺",
-        }
+    pub fn label(self) -> String {
+        let (zh, en) = match self {
+            OrgMode::Structure => ("保持原结构", "Keep original structure"),
+            OrgMode::Date => ("按拍摄日期建子文件夹", "Subfolder by capture date"),
+            OrgMode::Flat => ("全部平铺", "Flat into one folder"),
+        };
+        crate::i18n::t(zh, en).to_string()
     }
     pub fn code(self) -> &'static str {
         match self {
@@ -104,10 +105,14 @@ pub fn copy_mode_import(
     progress: ProgressFn,
 ) -> anyhow::Result<CopyOutcome> {
     if !source.exists() || !source.is_dir() {
-        anyhow::bail!("源路径不存在或不是文件夹: {}", source.display());
+        anyhow::bail!(
+            "{}{}",
+            crate::i18n::t("源路径不存在或不是文件夹: ", "Source path does not exist or is not a folder: "),
+            source.display()
+        );
     }
     if options.target_dir.trim().is_empty() {
-        anyhow::bail!("未设置目标目录");
+        anyhow::bail!("{}", crate::i18n::t("未设置目标目录", "Target directory not set"));
     }
     std::fs::create_dir_all(&options.target_dir)?;
 
@@ -458,11 +463,19 @@ fn check_disk_space(target_dir: &str, total_size: u64) -> anyhow::Result<()> {
     let free = fs4::available_space(target_dir)?;
     let required = (total_size as f64 * 1.05) as u64 + (512u64 << 20);
     if free < required {
-        anyhow::bail!(
-            "目标磁盘空间不足。需要约 {}，可用仅 {}。请清理目标磁盘空间或更换目标目录。",
-            human_bytes(required as i64),
-            human_bytes(free as i64)
-        );
+        let msg = match crate::i18n::lang() {
+            crate::i18n::Lang::Zh => format!(
+                "目标磁盘空间不足。需要约 {}，可用仅 {}。请清理目标磁盘空间或更换目标目录。",
+                human_bytes(required as i64),
+                human_bytes(free as i64)
+            ),
+            crate::i18n::Lang::En => format!(
+                "Not enough disk space on the target drive. Need ~{}, only {} available. Free up space or pick another target directory.",
+                human_bytes(required as i64),
+                human_bytes(free as i64)
+            ),
+        };
+        anyhow::bail!("{msg}");
     }
     Ok(())
 }
