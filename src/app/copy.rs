@@ -346,7 +346,8 @@ fn build_photo(
         status: Status::Untreated,
         thumb_hash: Some(hash),
         decode_failed: false,
-        preview_only: !crate::io::format::is_decodable(job.item.kind),
+        // 仅预览模式 (PRD 2.3): HEIC only; RAW is fully decodable (see import).
+        preview_only: matches!(job.item.kind, crate::io::format::FormatKind::Heif),
         rotation_override: 0,
         exif_orientation: job.ex.orientation.unwrap_or(1),
         pair_group_id: None,

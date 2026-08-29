@@ -132,7 +132,10 @@ pub fn add_mode_import_with_thumbs(
                 &capture_time,
             )),
             decode_failed: false,
-            preview_only: !crate::io::format::is_decodable(item.kind),
+            // 仅预览模式 (PRD 2.3): only formats the app cannot fully decode
+            // (HEIC without the system codec). RAW files are decodable via
+            // rawler; exotic failures get the decode_failed flag at Z-time.
+            preview_only: matches!(item.kind, crate::io::format::FormatKind::Heif),
             rotation_override: 0,
             exif_orientation: ex.orientation.unwrap_or(1),
             pair_group_id: None,

@@ -256,6 +256,28 @@ pub fn extract_embedded_preview(path: &Path) -> Option<Vec<u8>> {
     None
 }
 
+/// Cheap full-resolution dimension hint from the EXIF PixelXDimension /
+/// PixelYDimension (ExifImageWidth/Height) tags. Used by the Z-key 100% view
+/// to frame the display before the slow RAW decode lands; the authoritative
+/// dimensions arrive with the decoded pixels themselves. Returns None when
+/// the tags are absent or degenerate.
+pub fn pixel_dims(path: &Path) -> Option<(u32, u32)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let exif = Reader::new().read_from_container(&mut reader).ok()?;
+    let w = exif
+        .get_field(Tag::ImageWidth, In::PRIMARY)
+        .and_then(short_value)?;
+    let h = exif
+        .get_field(Tag::ImageLength, In::PRIMARY)
+        .and_then(short_value)?;
+    let (w, h) = (w as u32, h as u32);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((w, h))
+}
+
 fn read_abs<R: std::io::Seek + std::io::Read>(
     reader: &mut R,
     pos: u64,

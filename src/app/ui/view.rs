@@ -441,101 +441,183 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, theme::PREVIEW_BG);
 
-    if let Some(item) = app.state.ws.current().cloned() {
-        // Reset zoom when the current photo changes (anchor is per photo, PRD 7.4).
-        if app.zoom_photo_id != Some(item.id) {
-            app.zoom_active = false;
-            app.zoom_offset = egui::Vec2::ZERO;
-            app.zoom_photo_id = Some(item.id);
-        }
+    let Some(item) = app.state.ws.current().cloned() else {
+        return;
+    };
+    // Reset zoom when the current photo changes (anchor is per photo, PRD 7.4).
+    if app.zoom_photo_id != Some(item.id) {
+        app.zoom_active = false;
+        app.zoom_photo_id = Some(item.id);
+    }
 
-        let (tex, needs) = app.textures.preview_for(ui.ctx(), &item);
-        if needs {
-            let hash = item.thumb_hash.clone().unwrap_or_default();
-            app.thumbs.enqueue(item.id, &hash, &item.current_path);
-        }
-        let ts = tex.size_vec2();
-        if ts.x > 0.0 && ts.y > 0.0 {
-            let draw_rect;
-            if app.zoom_active {
-                // 100%: 1 image px = 1 screen px; pan with Ctrl+drag (PRD 7.4).
-                let pan = ui.input(|i| i.modifiers.ctrl);
-                if pan && resp.dragged() {
-                    app.zoom_offset += resp.drag_delta();
-                }
-                let mut top_left = rect.center() - ts * 0.5 + app.zoom_offset;
-                // Clamp so the image always covers the view when it is larger
-                // than the window; otherwise keep it centered.
-                if ts.x >= rect.width() {
-                    top_left.x = top_left.x.clamp(rect.max.x - ts.x, rect.min.x);
-                } else {
-                    top_left.x = rect.center().x - ts.x * 0.5;
-                }
-                if ts.y >= rect.height() {
-                    top_left.y = top_left.y.clamp(rect.max.y - ts.y, rect.min.y);
-                } else {
-                    top_left.y = rect.center().y - ts.y * 0.5;
-                }
-                draw_rect = egui::Rect::from_min_size(top_left, ts);
-            } else {
-                let margin = 24.0;
-                let avail = egui::vec2(rect.width() - margin * 2.0, rect.height() - margin * 2.0)
-                    .max(egui::vec2(1.0, 1.0));
-                let scale = (avail.x / ts.x).min(avail.y / ts.y);
-                let size = ts * scale;
-                draw_rect = egui::Rect::from_center_size(rect.center(), size);
+    let (tex, needs) = app.textures.preview_for(ui.ctx(), &item);
+    if needs {
+        let hash = item.thumb_hash.clone().unwrap_or_default();
+        app.thumbs.enqueue(item.id, &hash, &item.current_path);
+    }
+    let ts = tex.size_vec2();
+    if ts.x > 0.0 && ts.y > 0.0 {
+        let draw_rect;
+        if app.zoom_active {
+            // 100%: 1 RAW pixel = 1 screen pixel (PRD 7.4). Until the
+            // background full-resolution decode lands, the embedded preview is
+            // stretched into the RAW's true dimensions, so the framing is
+            // already correct and the swap to sharp pixels is seamless.
+            let full_tex = app.zoom_texture(&item);
+            let dims = full_tex
+                .as_ref()
+                .map(|t| t.size_vec2())
+                .or_else(|| {
+                    app.zoom_dims
+                        .get(&item.id)
+                        .map(|(w, h)| egui::vec2(*w as f32, *h as f32))
+                })
+                .unwrap_or(ts);
+
+            // Pan with Ctrl+drag (PRD 7.4 / M3 更正). The anchor is the image
+            // point (fractions 0..1) at the viewport center, so it survives
+            // the preview -> RAW texture swap unchanged.
+            if ui.input(|i| i.modifiers.ctrl) && resp.dragged() {
+                let d = resp.drag_delta();
+                app.zoom_center.0 =
+                    (app.zoom_center.0 - d.x / dims.x.max(1.0)).clamp(0.0, 1.0);
+                app.zoom_center.1 =
+                    (app.zoom_center.1 - d.y / dims.y.max(1.0)).clamp(0.0, 1.0);
             }
+            let mut cx = app.zoom_center.0;
+            let mut cy = app.zoom_center.1;
+            // Keep the image covering the viewport when it is larger; center
+            // otherwise (PRD 7.4 平移约束).
+            cx = if dims.x > rect.width() {
+                cx.clamp(rect.width() * 0.5 / dims.x, 1.0 - rect.width() * 0.5 / dims.x)
+            } else {
+                0.5
+            };
+            cy = if dims.y > rect.height() {
+                cy.clamp(rect.height() * 0.5 / dims.y, 1.0 - rect.height() * 0.5 / dims.y)
+            } else {
+                0.5
+            };
+            app.zoom_center = (cx, cy);
+            app.zoom_anchors.insert(item.id, (cx, cy));
+
+            let top_left =
+                egui::pos2(rect.center().x - cx * dims.x, rect.center().y - cy * dims.y);
+            draw_rect = egui::Rect::from_min_size(top_left, dims);
+            let shown = full_tex.as_ref().unwrap_or(&tex);
+            painter.image(
+                shown.id(),
+                draw_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+
+            // Zoom status label (PRD 4.6: which source is displayed).
+            let status = if full_tex.is_some() {
+                "100% · RAW 原生像素"
+            } else if app.zoom_worker.is_pending(item.id) {
+                "100% · RAW 解码中…（先以内嵌预览显示）"
+            } else if item.decode_failed {
+                "100% · RAW 解码失败，显示内嵌预览（右键可重试）"
+            } else {
+                "100%"
+            };
+            painter.text(
+                egui::pos2(rect.min.x + 8.0, rect.min.y + 8.0),
+                Align2::LEFT_TOP,
+                status,
+                egui::FontId::proportional(12.0),
+                theme::ACCENT,
+            );
+        } else {
+            let margin = 24.0;
+            let avail = egui::vec2(rect.width() - margin * 2.0, rect.height() - margin * 2.0)
+                .max(egui::vec2(1.0, 1.0));
+            let scale = (avail.x / ts.x).min(avail.y / ts.y);
+            let size = ts * scale;
+            draw_rect = egui::Rect::from_center_size(rect.center(), size);
             painter.image(
                 tex.id(),
                 draw_rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+        }
 
-            if app.zoom_active {
+        // Status corner badge.
+        match item.status {
+            Status::Delete => {
+                let badge = egui::Rect::from_min_size(
+                    egui::pos2(draw_rect.max.x - 42.0, draw_rect.min.y),
+                    egui::vec2(42.0, 24.0),
+                );
+                painter.rect_filled(badge, 0.0, theme::DELETE);
                 painter.text(
-                    egui::pos2(draw_rect.min.x + 6.0, draw_rect.min.y + 6.0),
-                    Align2::LEFT_TOP,
-                    "100%  Ctrl+拖拽平移",
+                    badge.center(),
+                    Align2::CENTER_CENTER,
+                    "待删",
                     egui::FontId::proportional(12.0),
-                    theme::ACCENT,
+                    egui::Color32::WHITE,
                 );
             }
-
-            // Status corner badge.
-            match item.status {
-                Status::Delete => {
-                    let badge = egui::Rect::from_min_size(
-                        egui::pos2(draw_rect.max.x - 42.0, draw_rect.min.y),
-                        egui::vec2(42.0, 24.0),
-                    );
-                    painter.rect_filled(badge, 0.0, theme::DELETE);
-                    painter.text(
-                        badge.center(),
-                        Align2::CENTER_CENTER,
-                        "待删",
-                        egui::FontId::proportional(12.0),
-                        egui::Color32::WHITE,
-                    );
-                }
-                Status::Reviewed => {
-                    let badge = egui::Rect::from_min_size(
-                        egui::pos2(draw_rect.max.x - 42.0, draw_rect.min.y),
-                        egui::vec2(42.0, 24.0),
-                    );
-                    painter.rect_filled(badge, 0.0, theme::KEEP);
-                    painter.text(
-                        badge.center(),
-                        Align2::CENTER_CENTER,
-                        "已阅",
-                        egui::FontId::proportional(12.0),
-                        egui::Color32::from_rgb(0x0f, 0x2a, 0x1c),
-                    );
-                }
-                Status::Untreated => {}
+            Status::Reviewed => {
+                let badge = egui::Rect::from_min_size(
+                    egui::pos2(draw_rect.max.x - 42.0, draw_rect.min.y),
+                    egui::vec2(42.0, 24.0),
+                );
+                painter.rect_filled(badge, 0.0, theme::KEEP);
+                painter.text(
+                    badge.center(),
+                    Align2::CENTER_CENTER,
+                    "已阅",
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(0x0f, 0x2a, 0x1c),
+                );
             }
+            Status::Untreated => {}
         }
     }
+
+    // Right-click menu on the preview (PRD 3.3.2, core subset).
+    preview_context_menu(app, ui, &resp, &item);
+}
+
+/// Right-click menu for the preview area (PRD 3.3.2): marking, RAW retry,
+/// reveal in Explorer, copy path.
+fn preview_context_menu(
+    app: &mut KakaApp,
+    _ui: &mut egui::Ui,
+    resp: &egui::Response,
+    item: &PhotoListItem,
+) {
+    resp.context_menu(|ui| {
+        if ui.button("标记待删（Q）").clicked() {
+            let _ = app.state.set_status_current(Status::Delete, true);
+            let _ = app.state.step(1);
+            app.needs_save = true;
+        }
+        if ui.button("标记已阅跳过（E）").clicked() {
+            let _ = app.state.set_status_current(Status::Reviewed, true);
+            let _ = app.state.step(1);
+            app.needs_save = true;
+        }
+        if ui.button("重置为未处理（U）").clicked() {
+            let _ = app.state.set_status_current(Status::Untreated, true);
+            app.needs_save = true;
+        }
+        ui.separator();
+        if item.decode_failed && ui.button("强制重试 RAW 解码").clicked() {
+            app.retry_zoom_decode(item.id);
+        }
+        if ui.button("在资源管理器中显示").clicked() {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", item.current_path))
+                .spawn();
+        }
+        if ui.button("复制文件路径").clicked() {
+            ui.ctx().copy_text(item.current_path.clone());
+        }
+    });
 }
 
 fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
@@ -568,6 +650,21 @@ fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
                 Status::Reviewed => ("已阅", theme::KEEP),
             };
             ui.label(RichText::new(format!("状态: {label}")).size(14.0).color(color).strong());
+            // Decode-state hints (PRD 3.4 / 7.4.3 / 2.3).
+            if p.decode_failed {
+                ui.label(
+                    RichText::new("RAW 解码失败，当前显示内嵌预览")
+                        .size(12.0)
+                        .color(theme::ACCENT),
+                );
+            }
+            if p.preview_only {
+                ui.label(
+                    RichText::new("此格式暂不支持完整解码")
+                        .size(12.0)
+                        .color(theme::ACCENT),
+                );
+            }
 
             // Histogram (PRD 7.5) — computed lazily from the preview cache.
             ui.separator();

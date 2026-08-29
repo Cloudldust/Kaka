@@ -4,7 +4,9 @@ use super::super::{import, state::AppState};
 use super::texture::TextureCache;
 use super::{dialogs, theme, view};
 use crate::app::card::{CardDetector, CardEvent};
+use crate::app::memcache::MemLru;
 use crate::app::thumbs::ThumbWorker;
+use crate::app::zoom::{ZoomMsg, ZoomWorker};
 use crate::config;
 use crate::db::{self, Db};
 use crate::model::*;
@@ -16,6 +18,10 @@ use std::sync::Arc;
 /// How many of the first imported photos get background thumbnail generation
 /// requested during the import (concurrent, so it never blocks the import loop).
 const ADD_THUMB_PREWARM: usize = 16;
+
+/// Memory cap for the Z-key full-resolution RAW texture LRU (PRD 7.4 / 9.5:
+/// 缓存在内存中，LRU 策略，总上限 2GB).
+const ZOOM_TEX_CAP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Messages sent from the background import thread back to the UI.
 pub enum ImportMsg {
@@ -84,10 +90,20 @@ pub struct KakaApp {
     /// removable card to the recycle bin after a fully-successful import.
     pub import_clear_card: bool,
 
-    // Zoom (Z-key) view state (PRD 7.4 — first cut: 100% render + space-pan).
+    // Zoom (Z-key) view state (PRD 7.4). The pan anchor is stored as the image
+    // point (fractions 0..1) shown at the viewport center, so it survives the
+    // preview -> RAW texture swap unchanged (无缝替换).
     pub zoom_active: bool,
-    pub zoom_offset: egui::Vec2,
+    pub zoom_center: (f32, f32),
     pub zoom_photo_id: Option<i64>,
+    /// Full-resolution RAW decoder for the 100% view (PRD 7.4 视口解码).
+    pub zoom_worker: ZoomWorker,
+    /// Decoded full-res textures, LRU-capped at 2 GB (PRD 7.4 内存缓存).
+    pub zoom_tex: MemLru<(i64, String), egui::TextureHandle>,
+    /// Full-resolution dimensions known so far (EXIF hint / decode result).
+    pub zoom_dims: std::collections::HashMap<i64, (u32, u32)>,
+    /// Per-photo remembered pan anchors for the session (PRD 7.4.1).
+    pub zoom_anchors: std::collections::HashMap<i64, (f32, f32)>,
 
     // Advanced-filter dialog draft (PRD 7.8), applied only on "应用".
     pub filter_draft: crate::model::Filter,
@@ -167,8 +183,12 @@ impl KakaApp {
             lr_path: None,
             import_clear_card: false,
             zoom_active: false,
-            zoom_offset: egui::Vec2::ZERO,
+            zoom_center: (0.5, 0.5),
             zoom_photo_id: None,
+            zoom_worker: ZoomWorker::new(),
+            zoom_tex: MemLru::new(ZOOM_TEX_CAP_BYTES),
+            zoom_dims: std::collections::HashMap::new(),
+            zoom_anchors: std::collections::HashMap::new(),
             filter_draft: crate::model::Filter::default(),
             settings_draft,
             card: crate::app::card::CardDetector::new(),
@@ -555,23 +575,29 @@ impl KakaApp {
                 self.toast(ToastKind::Info, "已取消选择");
             } else if self.zoom_active {
                 self.zoom_active = false;
-                self.zoom_offset = egui::Vec2::ZERO;
             }
             return;
         }
 
-        // Z: toggle 100% zoom (PRD 7.4). Ctrl+0 resets to fit.
+        // Z: toggle 100% zoom (PRD 7.4). Re-entering restores the photo's
+        // remembered pan anchor (PRD 7.4.1) and kicks off the full-resolution
+        // RAW decode (PRD 7.4 视口解码) when not already cached.
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Z)) {
             self.zoom_active = !self.zoom_active;
-            self.zoom_offset = egui::Vec2::ZERO;
-            if let Some(p) = self.state.ws.current() {
-                self.zoom_photo_id = Some(p.id);
+            if self.zoom_active {
+                if let Some(p) = self.state.ws.current().cloned() {
+                    self.zoom_center = self
+                        .zoom_anchors
+                        .get(&p.id)
+                        .copied()
+                        .unwrap_or((0.5, 0.5));
+                    self.request_zoom_decode(&p);
+                }
             }
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
             self.zoom_active = false;
-            self.zoom_offset = egui::Vec2::ZERO;
             self.toast(ToastKind::Info, "已重置为适配窗口");
             return;
         }
@@ -910,6 +936,99 @@ impl KakaApp {
         }
     }
 
+    // ---- Z-key full-resolution decode (PRD 7.4) ----
+
+    /// The decoded full-resolution texture for a photo, if available. When it
+    /// is missing this also queues the background decode (idempotent).
+    pub fn zoom_texture(&mut self, item: &PhotoListItem) -> Option<egui::TextureHandle> {
+        let hash = item.thumb_hash.clone().unwrap_or_default();
+        let key = (item.id, hash);
+        if let Some(tex) = self.zoom_tex.get(&key) {
+            return Some(tex);
+        }
+        self.request_zoom_decode(item);
+        None
+    }
+
+    /// Queue a full-resolution decode for `item` if it is eligible (RAW /
+    /// plainly decodable, not flagged decode_failed, not already in flight).
+    pub fn request_zoom_decode(&mut self, item: &PhotoListItem) {
+        if item.decode_failed || self.zoom_worker.is_pending(item.id) {
+            return;
+        }
+        if !zoom_full_decode_eligible(&item.current_path) {
+            return;
+        }
+        self.zoom_worker.request(item.id, std::path::Path::new(&item.current_path));
+    }
+
+    /// 强制重试 RAW 解码 (PRD 7.4.3): clear the persisted decode_failed flag
+    /// and retry once.
+    pub fn retry_zoom_decode(&mut self, photo_id: i64) {
+        let _ = db::photos::set_decode_failed(&self.state.db, photo_id, false);
+        if let Some(p) = self.state.ws.items.iter().find(|p| p.id == photo_id).cloned() {
+            if let Some(item) = self.state.ws.items.iter_mut().find(|p| p.id == photo_id) {
+                item.decode_failed = false;
+            }
+            self.request_zoom_decode(&p);
+            self.toast(ToastKind::Info, "正在重新解码 RAW…");
+        }
+    }
+
+    /// Fold decode-worker messages into state: dimension hints update the 100%
+    /// framing; finished decodes become textures in the 2 GB LRU; failures
+    /// persist the decode_failed flag (PRD 7.4.3).
+    pub fn poll_zoom(&mut self, ctx: &egui::Context) {
+        for msg in self.zoom_worker.poll() {
+            match msg {
+                ZoomMsg::Dims {
+                    photo_id,
+                    width,
+                    height,
+                } => {
+                    self.zoom_dims.insert(photo_id, (width, height));
+                }
+                ZoomMsg::Done { photo_id, result } => match result {
+                    Ok(d) => {
+                        self.zoom_dims.insert(photo_id, (d.width, d.height));
+                        let Some(item) = self.state.ws.items.iter().find(|p| p.id == photo_id) else {
+                            continue;
+                        };
+                        let hash = item.thumb_hash.clone().unwrap_or_default();
+                        let img = egui::ColorImage::from_rgba_unmultiplied(
+                            [d.width as usize, d.height as usize],
+                            &d.rgba,
+                        );
+                        let tex = ctx.load_texture(
+                            format!("zoom-{photo_id}"),
+                            img,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        let bytes = (d.width as u64) * (d.height as u64) * 4;
+                        self.zoom_tex.insert((photo_id, hash), tex, bytes);
+                    }
+                    Err(e) => {
+                        log::warn!("RAW 解码失败 photo_id={photo_id}: {e}");
+                        let _ = db::photos::set_decode_failed(&self.state.db, photo_id, true);
+                        if let Some(item) = self
+                            .state
+                            .ws
+                            .items
+                            .iter_mut()
+                            .find(|p| p.id == photo_id)
+                        {
+                            item.decode_failed = true;
+                        }
+                        self.toast(
+                            ToastKind::Warning,
+                            "RAW 解码失败，已标记为仅显示内嵌预览（右键可强制重试）",
+                        );
+                    }
+                },
+            }
+        }
+    }
+
     /// Enqueue background generation for every photo in the workspace whose
     /// thumbnail + preview caches are missing (PRD 9.3 / 3.1).
     pub fn enqueue_workspace_missing(&mut self) {
@@ -953,6 +1072,7 @@ impl eframe::App for KakaApp {
         self.handle_drops(&ctx);
         self.handle_card();
         self.poll_import();
+        self.poll_zoom(&ctx);
         self.handle_input(&ctx);
 
         // Enqueue missing thumb caches once per workspace.
@@ -962,9 +1082,27 @@ impl eframe::App for KakaApp {
         }
         self.drain_thumbs();
 
-        self.render(ui);
         self.maybe_autosave();
         self.expire_toasts();
         ctx.request_repaint();
     }
+}
+
+/// Whether the Z-key 100% view should attempt a full-resolution decode of this
+/// file: RAW (rawler develop) plus the formats `image` can decode directly.
+/// HEIC/HEIF is excluded — without the system codec there is nothing to decode,
+/// so it stays preview-only instead of being marked decode_failed.
+fn zoom_full_decode_eligible(path: &str) -> bool {
+    use crate::io::format::{classify, Classification, FormatKind};
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return false;
+    }
+    matches!(
+        classify(p),
+        Classification::Photo(FormatKind::Raw)
+            | Classification::Photo(FormatKind::Jpeg)
+            | Classification::Photo(FormatKind::Png)
+            | Classification::Photo(FormatKind::Tiff)
+    )
 }

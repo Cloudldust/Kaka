@@ -166,6 +166,16 @@ pub fn set_thumb_hash(db: &Db, id: i64, hash: Option<&str>) -> anyhow::Result<()
     Ok(())
 }
 
+/// Persist the RAW-decode-failed marker (PRD 7.4.3): failed photos are never
+/// retried on the next startup; the right-click 强制重试 clears it first.
+pub fn set_decode_failed(db: &Db, id: i64, failed: bool) -> anyhow::Result<()> {
+    db.conn.execute(
+        "UPDATE photos SET decode_failed = ?1 WHERE id = ?2",
+        params![failed as i64, id],
+    )?;
+    Ok(())
+}
+
 /// Update rotation override (0..=3) and exif orientation marker.
 pub fn set_rotation(db: &Db, id: i64, rotation_override: i64) -> anyhow::Result<()> {
     db.conn.execute(

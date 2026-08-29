@@ -123,6 +123,37 @@ fn decode_source(src: &Path) -> anyhow::Result<Option<image::DynamicImage>> {
     Ok(Some(img))
 }
 
+/// Decode a source image at FULL resolution for the Z-key 100% view (PRD 7.4).
+///
+/// Unlike [`decode_source`] — which prefers the small embedded JPEG for RAW
+/// files so thumbnail generation stays fast — this runs a complete rawler
+/// develop pipeline (rescale → demosaic → white balance → sRGB) so every
+/// sensor pixel is available. For JPEG/PNG/TIFF this is a plain `image::open`.
+/// Returns None when the file cannot be decoded at all.
+pub fn decode_full_res(src: &Path) -> Option<image::DynamicImage> {
+    let mut img = if let Ok(img) = image::open(src) {
+        img
+    } else {
+        // Full RAW develop — NOT extract_preview_pixels, which would return
+        // the small embedded preview (e.g. 1600px) and defeat the 1:1 view.
+        let rawfile = rawler::rawsource::RawSource::new(src).ok()?;
+        let decoder = rawler::get_decoder(&rawfile).ok()?;
+        let rawimage = decoder
+            .raw_image(&rawfile, &rawler::decoders::RawDecodeParams::default(), false)
+            .ok()?;
+        let developed = rawler::imgop::develop::RawDevelop::default()
+            .develop_intermediate(&rawimage)
+            .ok()?;
+        developed.to_dynamic_image()?
+    };
+    // EXIF orientation, same as decode_source.
+    let orient = crate::io::exif::parse_exif(src).orientation.unwrap_or(1) as u8;
+    if let Some(o) = image::metadata::Orientation::from_exif(orient) {
+        img.apply_orientation(o);
+    }
+    Some(img)
+}
+
 /// Locate an embedded medium-size preview JPEG inside a file by scanning for
 /// JPEG SOI markers. Returns the best candidate: a "preview-sized" image
 /// (long edge 1200–2800) is returned immediately; otherwise the candidate
