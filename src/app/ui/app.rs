@@ -1214,21 +1214,16 @@ impl eframe::App for KakaApp {
     }
 }
 
-/// Whether the Z-key 100% view should attempt a full-resolution decode of this
-/// file: RAW (rawler develop) plus the formats `image` can decode directly.
-/// HEIC/HEIF is excluded — without the system codec there is nothing to decode,
-/// so it stays preview-only instead of being marked decode_failed.
+/// Whether the Z-key 100% view should attempt a full-resolution decode.
+/// RAW only (rawler develop). Non-RAW photos zoom with the disk-cached
+/// 1920px preview directly — full-size decoding of e.g. a stitched panorama
+/// (tens of thousands of pixels) exceeds GPU texture limits / memory and
+/// crashes the app.
 fn zoom_full_decode_eligible(path: &str) -> bool {
     use crate::io::format::{classify, Classification, FormatKind};
     let p = std::path::Path::new(path);
     if !p.exists() {
         return false;
     }
-    matches!(
-        classify(p),
-        Classification::Photo(FormatKind::Raw)
-            | Classification::Photo(FormatKind::Jpeg)
-            | Classification::Photo(FormatKind::Png)
-            | Classification::Photo(FormatKind::Tiff)
-    )
+    matches!(classify(p), Classification::Photo(FormatKind::Raw))
 }

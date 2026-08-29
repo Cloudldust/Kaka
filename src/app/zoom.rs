@@ -146,9 +146,23 @@ impl Drop for ZoomWorker {
     }
 }
 
+/// GPU textures have a hard dimension limit (16384 on all common desktop
+/// GPUs). Real camera sensors stay far below it, but a stitched RAW panorama
+/// could exceed it — downscale instead of crashing the driver.
+const ZOOM_MAX_TEXTURE_EDGE: u32 = 16384;
+
 fn decode_full_rgba(path: &Path) -> Result<DecodedFull, String> {
     let img = crate::io::thumbnails::decode_full_res(path)
         .ok_or_else(|| "无法解码此文件（格式不支持或数据损坏）".to_string())?;
+    let (w, h) = (img.width(), img.height());
+    let img = if w.max(h) > ZOOM_MAX_TEXTURE_EDGE {
+        let scale = ZOOM_MAX_TEXTURE_EDGE as f64 / w.max(h) as f64;
+        let nw = ((w as f64) * scale).round().max(1.0) as u32;
+        let nh = ((h as f64) * scale).round().max(1.0) as u32;
+        img.resize(nw, nh, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
     let rgba = img.to_rgba8();
     Ok(DecodedFull {
         width: rgba.width(),

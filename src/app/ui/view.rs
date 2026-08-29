@@ -512,15 +512,20 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                 egui::Color32::WHITE,
             );
 
-            // Zoom status label (PRD 4.6: which source is displayed).
-            let status = if full_tex.is_some() {
-                "100% · RAW 原生像素"
+            // Zoom status label (PRD 4.6). RAW-specific hints only for RAW
+            // files; other formats zoom on the disk preview and just show the
+            // plain 100% marker.
+            let is_raw = crate::io::format::is_raw(std::path::Path::new(&item.current_path));
+            let status = if !is_raw {
+                "100%".to_string()
+            } else if full_tex.is_some() {
+                "100% · RAW 原生像素".to_string()
             } else if app.zoom_worker.is_pending(item.id) {
-                "100% · RAW 解码中…（先以内嵌预览显示）"
+                "100% · RAW 解码中…（先以内嵌预览显示）".to_string()
             } else if item.decode_failed {
-                "100% · RAW 解码失败，显示内嵌预览（右键可重试）"
+                "100% · RAW 解码失败，显示内嵌预览（右键可重试）".to_string()
             } else {
-                "100%"
+                "100%".to_string()
             };
             painter.text(
                 egui::pos2(rect.min.x + 8.0, rect.min.y + 8.0),
