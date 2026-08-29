@@ -243,7 +243,8 @@ impl KakaApp {
 
 /// Launch the GUI. This owns init, and blocks until the window closes.
 pub fn run() -> anyhow::Result<()> {
-    let _ = env_logger::try_init();
+    // File logging + panic hook first, so everything after it is captured.
+    crate::logging::init();
     crate::paths::ensure_dirs()?;
 
     // 1. Config.

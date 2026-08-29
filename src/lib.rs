@@ -5,5 +5,6 @@ pub mod config;
 pub mod db;
 pub mod i18n;
 pub mod io;
+pub mod logging;
 pub mod model;
 pub mod paths;
