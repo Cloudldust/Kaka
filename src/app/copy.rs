@@ -459,7 +459,7 @@ pub(crate) fn atomic_copy(src: &Path, dest: &Path) -> anyhow::Result<()> {
 }
 
 /// Disk-space pre-check (PRD 6.1.4): free_size >= total_size * 1.05 + 512MB.
-fn check_disk_space(target_dir: &str, total_size: u64) -> anyhow::Result<()> {
+pub(crate) fn check_disk_space(target_dir: &str, total_size: u64) -> anyhow::Result<()> {
     let free = fs4::available_space(target_dir)?;
     let required = (total_size as f64 * 1.05) as u64 + (512u64 << 20);
     if free < required {

@@ -133,3 +133,41 @@ fn remove_entry(idx: &CacheIndex, cache_dir: &Path, rel_path: &str) -> u64 {
     let _ = std::fs::remove_file(&p);
     size
 }
+
+/// Copy the whole cache directory tree to a new root (PRD 9.2 迁移).
+/// Includes cache_index.db (its WAL is checkpointed first so the copied file
+/// is complete). The old tree is left in place — the caller resets the global
+/// index handle first, then removes the old directory.
+/// Returns the number of files copied.
+pub fn migrate_cache(old_root: &Path, new_root: &Path) -> anyhow::Result<usize> {
+    if !old_root.is_dir() {
+        anyhow::bail!("旧缓存目录不存在: {}", old_root.display());
+    }
+    if old_root == new_root {
+        anyhow::bail!("新旧缓存路径相同");
+    }
+    std::fs::create_dir_all(new_root)?;
+    // Flush the old index WAL so the copied cache_index.db is complete.
+    if let Ok(idx) = CacheIndex::open(&old_root.join("cache_index.db")) {
+        let _ = idx.checkpoint();
+    }
+    let mut copied = 0usize;
+    copy_tree(old_root, new_root, &mut copied)?;
+    Ok(copied)
+}
+
+fn copy_tree(src: &Path, dst: &Path, copied: &mut usize) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_tree(&entry.path(), &dst_path, copied)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), &dst_path)?;
+            *copied += 1;
+        }
+    }
+    Ok(())
+}

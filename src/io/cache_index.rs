@@ -164,6 +164,12 @@ impl CacheIndex {
         )?;
         Ok(())
     }
+
+    /// Flush the WAL into the main db file (PRD 9.2: complete copy on migrate).
+    pub fn checkpoint(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
 }
 
 // ---- Global best-effort handle (used from the UI / worker threads) ----
@@ -215,6 +221,21 @@ pub fn register_cache_file(dest: &Path) {
     with_global(|idx| {
         let _ = idx.record_write(&rel, kind, size);
     });
+}
+
+/// Drop the global index connection so the next access reopens it at the
+/// CURRENT cache root (PRD 9.2: called after the cache folder moved).
+pub fn reset_global() {
+    if let Some(lock) = GLOBAL_INDEX.get() {
+        if let Ok(mut guard) = lock.lock() {
+            *guard = None;
+        }
+    }
+    if let Some(set) = TOUCHED.get() {
+        if let Ok(mut s) = set.lock() {
+            s.clear();
+        }
+    }
 }
 
 /// Bump last_access for a cache file once per path per process (plenty for LRU

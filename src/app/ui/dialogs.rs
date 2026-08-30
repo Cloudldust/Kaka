@@ -604,6 +604,11 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         ui.add(egui::DragValue::new(&mut r).range(0..=5).speed(1));
                         d.star_rating = r;
                         ui.end_row();
+                        ui.checkbox(
+                            &mut d.export_space_guard,
+                            t("导出时检测目标磁盘空间（5%+512MB）", "Check target disk space on export (5% + 512 MB)"),
+                        );
+                        ui.end_row();
                         ui.label(RichText::new(t("Lightroom 目录", "Lightroom folder")).size(13.0).color(theme::TEXT_WEAK));
                         ui.horizontal(|ui| {
                             let mut lr = d.lr_install_path.clone();
@@ -643,6 +648,24 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         if ui.add(egui::DragValue::new(&mut days).range(7..=365).suffix(t(" 天", " days"))).changed() {
                             d.cache_expire_days = days.max(7) as u64;
                         }
+                        ui.end_row();
+                        // 自定义缓存路径 (PRD 9.2): applied on 保存; the existing
+                        // cache can then be migrated to the new root.
+                        ui.label(RichText::new(t("缓存路径", "Cache folder")).size(13.0).color(theme::TEXT_WEAK));
+                        ui.horizontal(|ui| {
+                            let mut cd = d.cache_dir.clone();
+                            if ui
+                                .add(egui::TextEdit::singleline(&mut cd).desired_width(280.0))
+                                .changed()
+                            {
+                                d.cache_dir = cd;
+                            }
+                            if ui.button(t("浏览…", "Browse…")).clicked() {
+                                if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                                    d.cache_dir = p.to_string_lossy().into_owned();
+                                }
+                            }
+                        });
                         ui.end_row();
                     });
                 ui.horizontal(|ui| {
@@ -708,6 +731,50 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
         // Apply draft to live config + persist + switch the UI language.
         app.kb_capture = None;
         app.kb_error = None;
+
+        // 缓存路径变更 (PRD 9.2): validate the new path, reroute all cache IO
+        // via the override, and offer to migrate the existing cache across.
+        let old_cache = app.state.config.cache_dir.clone();
+        let mut new_cache = app.settings_draft.cache_dir.trim().to_string();
+        if new_cache.is_empty() {
+            new_cache = crate::paths::default_cache_dir().to_string_lossy().into_owned();
+        }
+        if new_cache != old_cache {
+            match std::fs::create_dir_all(&new_cache) {
+                Ok(()) => {
+                    crate::paths::set_cache_override(Some(std::path::PathBuf::from(&new_cache)));
+                    app.settings_draft.cache_dir = new_cache.clone();
+                    if std::path::Path::new(&old_cache).is_dir() {
+                        let old_path = std::path::PathBuf::from(&old_cache);
+                        let new_path = std::path::PathBuf::from(&new_cache);
+                        app.confirm = Some(ConfirmDialog {
+                            title: t("迁移缓存", "Migrate cache").into(),
+                            text: match i18n::lang() {
+                                i18n::Lang::Zh => format!(
+                                    "检测到缓存路径变更。\n确认：把旧缓存（{old_cache}）迁移到新路径并删除旧目录。\n取消：保留旧缓存目录，之后可手动删除。"
+                                ),
+                                i18n::Lang::En => format!(
+                                    "Cache path changed.\nConfirm: migrate the old cache ({old_cache}) to the new path and delete the old folder.\nCancel: keep the old cache folder (delete it manually later)."
+                                ),
+                            },
+                            confirm_label: t("迁移并删除旧缓存", "Migrate & delete old").into(),
+                            danger: false,
+                            on_confirm: Box::new(move |app| {
+                                app.start_cache_migration(old_path, new_path);
+                            }),
+                        });
+                    }
+                }
+                Err(e) => {
+                    app.toast(
+                        ToastKind::Error,
+                        format!("{}{e}", t("缓存路径无法创建，已保留原路径：", "Cannot create cache folder, keeping the old path: ")),
+                    );
+                    app.settings_draft.cache_dir = old_cache;
+                }
+            }
+        }
+
         app.state.config = app.settings_draft.clone();
         i18n::set_lang(i18n::Lang::from_code(&app.state.config.language));
         if let Err(e) = crate::config::save(&app.state.config) {
@@ -1055,6 +1122,7 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 app.export_org,
                 true,
                 true,
+                app.state.config.export_space_guard,
                 &mut progress,
             ) {
                 Ok(out) => {

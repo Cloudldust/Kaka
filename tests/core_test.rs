@@ -560,7 +560,7 @@ fn export_kept_copy_and_file_list() {
     // 12.1: copy kept photos to a flat target dir.
     let target = root.join("out");
     let mut xp = |_d: usize, _t: usize| -> bool { true };
-    let out = export_kept_copy(&db, &folder, &target.to_string_lossy(), OrgMode::Flat, false, false, &mut xp).unwrap();
+    let out = export_kept_copy(&db, &folder, &target.to_string_lossy(), OrgMode::Flat, false, false, true, &mut xp).unwrap();
     assert_eq!(out.total, 2, "only the two kept photos should be exported");
     assert_eq!(out.copied, 2);
     assert!(target.join("DSC_0001.JPG").exists());
@@ -888,4 +888,43 @@ fn step_wrap_at_end_toggle() {
     // Normal in-range moves are unaffected by the flag.
     assert!(!app.step(-1, true));
     assert_eq!(app.ws.current_index, 1);
+}
+
+#[test]
+fn cache_migration_copies_tree() {
+    use kaka::io::cache_clean::migrate_cache;
+    use kaka::io::cache_index::CacheIndex;
+    use std::path::Path;
+
+    let root = temp_root();
+    let old = root.join("old_cache");
+    let new = root.join("new_cache");
+    std::fs::create_dir_all(old.join("thumbs")).unwrap();
+    std::fs::create_dir_all(old.join("previews")).unwrap();
+    std::fs::write(old.join("thumbs/a.jpg"), vec![1u8; 16]).unwrap();
+    std::fs::write(old.join("previews/b.jpg"), vec![2u8; 32]).unwrap();
+
+    // A real index db so the checkpoint path is exercised.
+    let idx = CacheIndex::open(&old.join("cache_index.db")).unwrap();
+    idx.record_write("thumbs/a.jpg", "thumb", 16).unwrap();
+    drop(idx); // release the file so the old tree can be deleted later
+
+    let n = migrate_cache(&old, &new).unwrap();
+    // 3 essential files (+ SQLite -wal/-shm sidecars when present).
+    assert!(n >= 3, "expected at least 3 copied files, got {n}");
+    assert!(new.join("thumbs/a.jpg").exists());
+    assert!(new.join("previews/b.jpg").exists());
+    assert!(new.join("cache_index.db").exists());
+
+    // The copied index still resolves its entries (rel-path based).
+    let new_idx = CacheIndex::open(&new.join("cache_index.db")).unwrap();
+    assert!(new_idx.has("thumbs/a.jpg").unwrap());
+
+    // Same-path migration is rejected.
+    assert!(migrate_cache(&old, &old).is_err());
+
+    // Caller-side cleanup after reset (mirrors app::start_cache_migration).
+    kaka::io::cache_index::reset_global();
+    std::fs::remove_dir_all(&old).unwrap();
+    assert!(!Path::new(&old).exists());
 }

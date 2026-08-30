@@ -14,12 +14,34 @@ pub fn db_path() -> PathBuf {
     app_data_dir().join("kaka.db")
 }
 
-/// %LOCALAPPDATA%/Kaka/cache — disk cache root.
-pub fn cache_dir() -> PathBuf {
+/// User-configured cache root override (设置 → 缓存路径, PRD 9.2).
+/// `None` = use the default location. Set at startup and on settings save.
+static CACHE_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Apply the cache-root override from settings. `None`/empty → default path.
+pub fn set_cache_override(path: Option<PathBuf>) {
+    let mut g = CACHE_OVERRIDE.write().unwrap();
+    *g = path.filter(|p| !p.as_os_str().is_empty());
+}
+
+/// The default cache root: %LOCALAPPDATA%/Kaka/cache.
+pub fn default_cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| std::env::temp_dir())
         .join("Kaka")
         .join("cache")
+}
+
+/// The active disk cache root: the user override when set, else the default.
+/// All cache sub-paths (thumbs/previews/cache_index) derive from this, so a
+/// settings change reroutes every cache read/write in one place.
+pub fn cache_dir() -> PathBuf {
+    if let Ok(g) = CACHE_OVERRIDE.read() {
+        if let Some(p) = g.as_ref() {
+            return p.clone();
+        }
+    }
+    default_cache_dir()
 }
 
 /// %LOCALAPPDATA%/Kaka/cache/thumbs — thumbnail cache.

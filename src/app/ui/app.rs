@@ -172,6 +172,10 @@ pub struct KakaApp {
     pub kb_capture: Option<String>,
     /// Last capture error (conflict / reserved key), shown under the grid.
     pub kb_error: Option<String>,
+
+    /// Cache-root migration in flight (PRD 9.2): background copy old → new.
+    pub cache_migrating: bool,
+    pub cache_migrate_rx: Option<Receiver<anyhow::Result<usize>>>,
 }
 
 pub struct ConfirmDialog {
@@ -253,6 +257,8 @@ impl KakaApp {
             fullscreen: false,
             kb_capture: None,
             kb_error: None,
+            cache_migrating: false,
+            cache_migrate_rx: None,
         };
         if app.startup.first_run {
             app.toast(
@@ -269,11 +275,17 @@ impl KakaApp {
 pub fn run() -> anyhow::Result<()> {
     // File logging + panic hook first, so everything after it is captured.
     crate::logging::init();
-    crate::paths::ensure_dirs()?;
 
-    // 1. Config.
+    // 1. Config (cache override before ensure_dirs, PRD 9.2, so the user's
+    // cache folder is the one created/used from the first frame on).
     let cfg = config::load();
     i18n::set_lang(i18n::Lang::from_code(&cfg.language));
+    crate::paths::set_cache_override(if cfg.cache_dir.trim().is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(cfg.cache_dir.trim()))
+    });
+    crate::paths::ensure_dirs()?;
 
     // 2. Database open + integrity + migration.
     let (db, startup) = init_database()?;
@@ -1353,6 +1365,55 @@ impl KakaApp {
         });
     }
 
+    /// Migrate the whole cache directory to a new root on a background
+    /// thread (PRD 9.2): copy → reset the global index handle → remove old.
+    pub fn start_cache_migration(&mut self, old: std::path::PathBuf, new: std::path::PathBuf) {
+        if self.cache_migrating {
+            return;
+        }
+        self.cache_migrating = true;
+        self.toast(
+            ToastKind::Info,
+            t("正在迁移缓存到新路径…", "Migrating cache to the new path…"),
+        );
+        let (tx, rx) = channel();
+        self.cache_migrate_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<usize> {
+                let n = crate::io::cache_clean::migrate_cache(&old, &new)?;
+                // Reopen the index at the new root before deleting the old tree.
+                crate::io::cache_index::reset_global();
+                std::fs::remove_dir_all(&old)?;
+                Ok(n)
+            })();
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Non-blocking drain of migration results.
+    fn poll_cache_migrate(&mut self) {
+        let Some(rx) = &self.cache_migrate_rx else {
+            return;
+        };
+        if let Ok(res) = rx.try_recv() {
+            self.cache_migrate_rx = None;
+            self.cache_migrating = false;
+            match res {
+                Ok(n) => {
+                    let msg = match i18n::lang() {
+                        i18n::Lang::Zh => format!("缓存迁移完成：已复制 {n} 个文件并清理旧目录"),
+                        i18n::Lang::En => format!("Cache migrated: {n} files copied, old folder removed"),
+                    };
+                    self.toast(ToastKind::Success, msg);
+                }
+                Err(e) => self.toast(
+                    ToastKind::Error,
+                    format!("{}{e}", t("缓存迁移失败：", "Cache migration failed: ")),
+                ),
+            }
+        }
+    }
+
     /// Non-blocking drain of cleanup results. Small cleans stay silent
     /// (PRD 9.4 边用边删); a settings-triggered full clean toasts the outcome.
     fn poll_cache_clean(&mut self) {
@@ -1440,6 +1501,7 @@ impl eframe::App for KakaApp {
         self.poll_import();
         self.poll_zoom(&ctx);
         self.poll_cache_clean();
+        self.poll_cache_migrate();
         self.handle_input(&ctx);
 
         // Enqueue missing thumb caches once per workspace.

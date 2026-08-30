@@ -31,6 +31,7 @@ pub type ExportProgress<'a> = &'a mut dyn FnMut(usize, usize) -> bool;
 /// 12.1: copy every kept photo (status != Delete) into `target_dir`, organized
 /// by `org`. RAW+JPG pairs are copied together. Optionally copies the original
 /// sidecar and writes a rotation XMP sidecar.
+#[allow(clippy::too_many_arguments)]
 pub fn export_kept_copy(
     db: &Db,
     folder: &str,
@@ -38,6 +39,7 @@ pub fn export_kept_copy(
     org: OrgMode,
     copy_sidecar: bool,
     write_rotation_xmp: bool,
+    space_guard: bool,
     progress: ExportProgress,
 ) -> anyhow::Result<ExportOutcome> {
     if target_dir.trim().is_empty() {
@@ -115,6 +117,17 @@ pub fn export_kept_copy(
         };
         *n += 1;
         files.push((src, dir.join(final_name)));
+    }
+
+    // Disk-space pre-check (PRD 12.1 / 6.1.4), gated by 导出磁盘检测缓冲:
+    // free_size >= total_size × 1.05 + 512MB or the export is blocked before
+    // any file is copied.
+    if space_guard && !files.is_empty() {
+        let mut total_size: u64 = 0;
+        for (src, _) in &files {
+            total_size += std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+        }
+        crate::app::copy::check_disk_space(target_dir, total_size)?;
     }
 
     let total = files.len();
