@@ -263,6 +263,10 @@ pub struct AppConfig {
     pub lr_install_path: String,
     /// UI language code: "zh" (default) or "en".
     pub language: String,
+    /// Custom keybinding overrides: action code → key code (e.g.
+    /// "mark_delete" → "Q"). Missing entries use the built-in defaults
+    /// (app::keybinds); reserved keys can never be bound.
+    pub keybindings: std::collections::HashMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -291,6 +295,7 @@ impl Default for AppConfig {
             export_space_guard: true,
             lr_install_path: String::new(),
             language: "zh".to_string(),
+            keybindings: std::collections::HashMap::new(),
         }
     }
 }

@@ -10,5 +10,7 @@ pub mod state;
 pub mod shortcuts;
 pub mod thumbs;
 #[cfg(feature = "gui")]
+pub mod keybinds;
+#[cfg(feature = "gui")]
 pub mod ui;
 pub mod zoom;

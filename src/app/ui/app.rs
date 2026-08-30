@@ -160,6 +160,18 @@ pub struct KakaApp {
     pub last_clean_at: std::time::Instant,
     /// Cache usage snapshot (total bytes, file count) taken when settings open.
     pub cache_usage: Option<(i64, i64)>,
+
+    /// Digit-jump buffer (PRD 4.8.2): accumulated 0-9 digits; Enter jumps,
+    /// Esc/2s idle cancels.
+    pub digit_buffer: String,
+    pub digit_started: std::time::Instant,
+    /// Borderless fullscreen state (F11 toggles, Esc exits).
+    pub fullscreen: bool,
+    /// Custom-key capture in progress: the action code being rebound
+    /// (设置 → 快捷键). While set, the settings dialog owns the keyboard.
+    pub kb_capture: Option<String>,
+    /// Last capture error (conflict / reserved key), shown under the grid.
+    pub kb_error: Option<String>,
 }
 
 pub struct ConfirmDialog {
@@ -236,6 +248,11 @@ impl KakaApp {
             last_viewed_id: None,
             last_clean_at: std::time::Instant::now(),
             cache_usage: None,
+            digit_buffer: String::new(),
+            digit_started: std::time::Instant::now(),
+            fullscreen: false,
+            kb_capture: None,
+            kb_error: None,
         };
         if app.startup.first_run {
             app.toast(
@@ -525,45 +542,143 @@ impl KakaApp {
         }
     }
 
-    /// Handle global keyboard shortcuts (PRD 7.2).
+    /// Handle global keyboard shortcuts (PRD 7.2). Remappable actions go
+    /// through the user's bindings (设置 → 快捷键); reserved keys are fixed.
     fn handle_input(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
 
-        if self.state.show_import
-            || self.state.show_settings
-            || self.state.show_delete_box
-            || self.state.show_crash_recovery
-            || self.state.show_export
-            || self.state.show_filter
-            || self.confirm.is_some()
-        {
+        // While capturing a custom binding the settings dialog owns the keyboard.
+        if self.kb_capture.is_some() {
             return;
         }
         if ctx.memory(|m| m.focused().is_some()) {
             return;
         }
+
+        let modal_open = self.state.show_import
+            || self.state.show_settings
+            || self.state.show_delete_box
+            || self.state.show_crash_recovery
+            || self.state.show_export
+            || self.state.show_filter
+            || self.confirm.is_some();
+
+        // Esc chain: cancel digit jump → close dialog → exit fullscreen →
+        // clear selection → leave 100% zoom (PRD 7.2). Crash/resume dialogs
+        // need an explicit choice and are deliberately not ESC-dismissable.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            if !self.digit_buffer.is_empty() {
+                self.digit_buffer.clear();
+            } else if self.confirm.is_some() {
+                self.confirm = None;
+            } else if self.state.show_import {
+                self.state.show_import = false;
+            } else if self.state.show_settings {
+                self.state.show_settings = false;
+                self.kb_capture = None;
+                self.kb_error = None;
+            } else if self.state.show_filter {
+                self.state.show_filter = false;
+            } else if self.state.show_export {
+                self.state.show_export = false;
+            } else if self.state.show_delete_box {
+                self.state.show_delete_box = false;
+            } else if self.fullscreen {
+                self.set_fullscreen(ctx, false);
+            } else if self.state.clear_selection() {
+                self.toast(ToastKind::Info, t("已取消选择", "Selection cleared"));
+            } else if self.zoom_active {
+                self.zoom_active = false;
+            }
+            return;
+        }
+
+        // F11: fullscreen toggle (reserved).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F11)) {
+            self.set_fullscreen(ctx, !self.fullscreen);
+            return;
+        }
+
+        if modal_open {
+            return;
+        }
+
+        // Digit jump: 0-9 accumulate into a buffer, Enter jumps, 2s idle
+        // cancels (PRD 4.8.2 数字跳片). Collected in event order so fast
+        // typing that lands several digits in one frame is not lost; digits
+        // may arrive as Key::NumX or as Text events (numpad/IME paths).
+        // One physical press arrives as BOTH a Key event and a Text event
+        // (the WM_CHAR echo), so collect them separately: prefer Key digits
+        // and only fall back to Text digits when no Key digit was seen —
+        // otherwise "5" would be recorded twice.
+        let mut key_digits: Vec<char> = Vec::new();
+        let mut text_digits: Vec<char> = Vec::new();
+        let mut enter_pressed = false;
+        ctx.input(|i| {
+            for e in &i.events {
+                match e {
+                    egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {
+                        if *key == Key::Enter {
+                            enter_pressed = true;
+                        } else if modifiers.is_none() {
+                            if let Some(ch) = digit_key_char(*key) {
+                                key_digits.push(ch);
+                            }
+                        }
+                    }
+                    egui::Event::Text(txt)
+                        if txt.len() == 1 && txt.as_bytes()[0].is_ascii_digit() =>
+                    {
+                        text_digits.push(txt.as_bytes()[0] as char);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let new_digits = if !key_digits.is_empty() { key_digits } else { text_digits };
+        if !new_digits.is_empty() {
+            for ch in new_digits {
+                if self.digit_buffer.chars().count() < 6 {
+                    self.digit_buffer.push(ch);
+                }
+            }
+            self.digit_started = std::time::Instant::now();
+        } else if !self.digit_buffer.is_empty()
+            && self.digit_started.elapsed() >= std::time::Duration::from_secs(2)
+        {
+            self.digit_buffer.clear();
+        }
+        if enter_pressed && !self.digit_buffer.is_empty() {
+            let n: usize = self.digit_buffer.parse().unwrap_or(0);
+            self.digit_buffer.clear();
+            let len = self.state.ws.items.len();
+            if len > 0 && n >= 1 {
+                let target = (n - 1).min(len - 1);
+                self.state.jump_to(target);
+                let shown = target + 1;
+                let msg = match i18n::lang() {
+                    i18n::Lang::Zh => format!("已跳到第 {shown} 张"),
+                    i18n::Lang::En => format!("Jumped to photo {shown}"),
+                };
+                self.toast(ToastKind::Info, msg);
+                self.needs_save = true;
+            }
+            return;
+        }
+
         if self.state.ws.folder_path.is_empty() {
             return;
         }
 
-        // Navigation — right/D/Space next, left/A prev.
-        let next = ctx.input_mut(|i| {
-            i.consume_key(Modifiers::NONE, Key::ArrowRight)
-                || i.consume_key(Modifiers::NONE, Key::D)
-                || i.consume_key(Modifiers::NONE, Key::Space)
-        });
-        if next {
+        // Navigation (remappable).
+        if self.fire(ctx, "next_photo") {
             if self.state.step(1) {
                 self.toast(ToastKind::Info, t("已是最后一张", "Already at the last photo"));
             }
             self.needs_save = true;
             return;
         }
-        let prev = ctx.input_mut(|i| {
-            i.consume_key(Modifiers::NONE, Key::ArrowLeft)
-                || i.consume_key(Modifiers::NONE, Key::A)
-        });
-        if prev {
+        if self.fire(ctx, "prev_photo") {
             if self.state.step(-1) {
                 self.toast(ToastKind::Info, t("已是第一张", "Already at the first photo"));
             }
@@ -571,7 +686,7 @@ impl KakaApp {
             return;
         }
 
-        // Home / End.
+        // Home / End (reserved).
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
             self.state.jump_to(0);
             self.toast(ToastKind::Info, t("已跳到第 1 张", "Jumped to photo 1"));
@@ -590,18 +705,17 @@ impl KakaApp {
             return;
         }
 
-        // Undo / redo (single Q/E/U operations only, PRD 7.2).
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Z)) {
+        // Undo / redo (remappable; Ctrl+Shift+Z stays a reserved redo alias).
+        if self.fire(ctx, "undo") {
             if self.state.undo() {
                 self.toast(ToastKind::Info, t("已撤销", "Undone"));
                 self.needs_save = true;
             }
             return;
         }
-        if ctx.input_mut(|i| {
-            i.consume_key(Modifiers::CTRL, Key::Y)
-                || i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z)
-        }) {
+        if self.fire(ctx, "redo")
+            || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z))
+        {
             if self.state.redo() {
                 self.toast(ToastKind::Info, t("已重做", "Redone"));
                 self.needs_save = true;
@@ -609,8 +723,8 @@ impl KakaApp {
             return;
         }
 
-        // Select all / deselect (PRD 7.9.1).
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::A)) {
+        // Select all (remappable) / deselect (reserved).
+        if self.fire(ctx, "select_all") {
             self.state.select_all(true);
             let n = self.state.ws.selected_count();
             let msg = match i18n::lang() {
@@ -625,20 +739,9 @@ impl KakaApp {
             self.toast(ToastKind::Info, t("已取消全选", "Deselected all"));
             return;
         }
-        // Esc: clear selection first, then exit 100% zoom (PRD 7.2 / 7.4).
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            if self.state.clear_selection() {
-                self.toast(ToastKind::Info, t("已取消选择", "Selection cleared"));
-            } else if self.zoom_active {
-                self.zoom_active = false;
-            }
-            return;
-        }
 
-        // Z: toggle 100% zoom (PRD 7.4). Re-entering restores the photo's
-        // remembered pan anchor (PRD 7.4.1) and kicks off the full-resolution
-        // RAW decode (PRD 7.4 视口解码) when not already cached.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Z)) {
+        // Z: toggle 100% zoom (remappable); Ctrl+0 reset (reserved).
+        if self.fire(ctx, "toggle_zoom") {
             self.zoom_active = !self.zoom_active;
             if self.zoom_active {
                 if let Some(p) = self.state.ws.current().cloned() {
@@ -658,7 +761,7 @@ impl KakaApp {
             return;
         }
 
-        // Ctrl+Q / Ctrl+E / Ctrl+U → batch apply to the selection (confirmed).
+        // Ctrl+Q / Ctrl+E / Ctrl+U → batch apply to the selection (reserved).
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Q)) {
             self.apply_batch_status(Status::Delete);
             return;
@@ -672,8 +775,8 @@ impl KakaApp {
             return;
         }
 
-        // Single Q / E / U → current photo (undoable), then auto-advance.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
+        // Single marks (remappable) → current photo; Q/E auto-advance.
+        if self.fire(ctx, "mark_delete") {
             let changed = self.state.set_status_current(Status::Delete, true).unwrap_or(false);
             self.needs_save = true;
             if changed {
@@ -684,7 +787,7 @@ impl KakaApp {
             }
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::E)) {
+        if self.fire(ctx, "mark_reviewed") {
             let changed = self.state.set_status_current(Status::Reviewed, true).unwrap_or(false);
             self.needs_save = true;
             if changed {
@@ -695,32 +798,29 @@ impl KakaApp {
             }
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::U)) {
+        if self.fire(ctx, "mark_untreated") {
             let changed = self.state.set_status_current(Status::Untreated, true).unwrap_or(false);
             self.needs_save = true;
             let _ = changed;
             return;
         }
 
-        // Rotation (PRD 7.2): R = CW 90°, Ctrl+R = CCW 90°, Shift+R = back to
-        // the EXIF orientation. Checked before plain R so the modified chords
-        // win. The angle is DB-only (rotation_override) — never written to the
-        // file, and it does not enter the undo stack.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::R)) {
-            self.rotate_current(-1);
-            return;
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::R)) {
-            self.rotate_current(0);
-            return;
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::R)) {
-            self.rotate_current(1);
+        // Toggle right info panel (remappable, PRD 7.2 / UI spec 2.3).
+        if self.fire(ctx, "toggle_panel") {
+            self.state.right_panel_visible = !self.state.right_panel_visible;
+            self.toast(
+                ToastKind::Info,
+                if self.state.right_panel_visible {
+                    t("已展开信息面板", "Info panel shown")
+                } else {
+                    t("已折叠信息面板", "Info panel hidden")
+                },
+            );
             return;
         }
 
-        // Ctrl+S save; Ctrl+I / Ctrl+O open import.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S)) {
+        // Ctrl+S save (remappable); Ctrl+I / Ctrl+O import (reserved).
+        if self.fire(ctx, "save") {
             self.save_workspace();
             self.toast(ToastKind::Success, t("工作区已保存", "Workspace saved"));
             return;
@@ -733,29 +833,28 @@ impl KakaApp {
         }
     }
 
-    /// Rotate the current photo and toast the outcome (PRD 4.7).
-    /// `delta`: +1 = CW 90°, -1 = CCW 90°, 0 = reset to EXIF orientation.
-    fn rotate_current(&mut self, delta: i64) {
-        match self.state.rotate_current(delta) {
-            Ok(Some(_)) => {}
-            Ok(None) => return,
-            Err(e) => {
-                self.toast(
-                    ToastKind::Error,
-                    format!("{}{e}", t("旋转失败：", "Rotation failed: ")),
-                );
-                return;
+    /// True if the current binding of `action` was pressed this frame.
+    fn fire(&self, ctx: &egui::Context, action: &str) -> bool {
+        for code in crate::app::keybinds::effective_codes(&self.state.config.keybindings, action) {
+            if crate::app::keybinds::consume(ctx, &code) {
+                return true;
             }
         }
-        self.needs_save = true;
-        let msg = if delta == 0 {
-            t("已重置为 EXIF 方向", "Reset to EXIF orientation").to_string()
-        } else if delta > 0 {
-            t("已顺时针旋转 90°", "Rotated 90° clockwise").to_string()
-        } else {
-            t("已逆时针旋转 90°", "Rotated 90° counter-clockwise").to_string()
-        };
-        self.toast(ToastKind::Info, msg);
+        false
+    }
+
+    /// Toggle borderless fullscreen (F11 in, Esc out).
+    fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        self.fullscreen = on;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        self.toast(
+            ToastKind::Info,
+            if on {
+                t("已进入全屏（F11 / Esc 退出）", "Fullscreen (F11 or Esc to exit)")
+            } else {
+                t("已退出全屏", "Exited fullscreen")
+            },
+        );
     }
 
     /// Batch-apply a status to the current selection (Ctrl+Q/E/U, PRD 7.9.2).
@@ -1315,6 +1414,24 @@ impl eframe::App for KakaApp {
 /// 1920px preview directly — full-size decoding of e.g. a stitched panorama
 /// (tens of thousands of pixels) exceeds GPU texture limits / memory and
 /// crashes the app.
+/// The digit character for an egui number key, if any (数字跳片).
+fn digit_key_char(key: egui::Key) -> Option<char> {
+    let ch = match key {
+        egui::Key::Num0 => '0',
+        egui::Key::Num1 => '1',
+        egui::Key::Num2 => '2',
+        egui::Key::Num3 => '3',
+        egui::Key::Num4 => '4',
+        egui::Key::Num5 => '5',
+        egui::Key::Num6 => '6',
+        egui::Key::Num7 => '7',
+        egui::Key::Num8 => '8',
+        egui::Key::Num9 => '9',
+        _ => return None,
+    };
+    Some(ch)
+}
+
 fn zoom_full_decode_eligible(path: &str) -> bool {
     use crate::io::format::{classify, Classification, FormatKind};
     let p = std::path::Path::new(path);

@@ -298,7 +298,24 @@ fn render_status_bar(app: &mut KakaApp, ui: &mut egui::Ui) {
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(t("Q 待删 | E 跳过 | ← → 切换", "Q delete | E skip | left/right navigate")).size(13.0).color(theme::TEXT_WEAK));
+            // Hint reflects the user's current bindings (PRD 7.6).
+            let kb = &app.state.config.keybindings;
+            let disp = |action: &str| {
+                crate::app::keybinds::display(&crate::app::keybinds::effective_codes(kb, action)[0])
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{} {} | {} {} | {} {}",
+                    disp("mark_delete"),
+                    t("待删", "delete"),
+                    disp("mark_reviewed"),
+                    t("跳过", "skip"),
+                    disp("next_photo"),
+                    t("下一张", "next"),
+                ))
+                .size(13.0)
+                .color(theme::TEXT_WEAK),
+            );
         });
     });
 }

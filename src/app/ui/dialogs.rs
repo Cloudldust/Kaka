@@ -33,6 +33,26 @@ pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
     if app.state.show_delete_box {
         delete_box(app, ctx);
     }
+    // Digit-jump indicator: accumulated digits + cursor (PRD 4.8.2).
+    if !app.digit_buffer.is_empty() {
+        egui::Area::new(egui::Id::new("digit_jump"))
+            .anchor(Align2::RIGHT_TOP, [-16.0, 64.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 0xF2))
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER_2))
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("{}_", app.digit_buffer))
+                                .size(16.0)
+                                .strong()
+                                .color(theme::ACCENT),
+                        );
+                    });
+            });
+    }
     render_toasts(app, ctx);
 }
 
@@ -407,6 +427,45 @@ fn crash_recovery(app: &mut KakaApp, ctx: &egui::Context) {
 fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     // Edit a draft; only "保存" applies it to the live config and persists it.
     let mut save = false;
+
+    // Custom-key capture (PRD 7.2.1): read the first pressed key event this
+    // frame. Esc cancels; reserved keys and conflicts keep the capture open
+    // with a red hint (不允许保存，直到换键或先解除冲突).
+    if let Some(action) = app.kb_capture.clone() {
+        let ev = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {
+                    Some((*key, *modifiers))
+                }
+                _ => None,
+            })
+        });
+        if let Some((key, mods)) = ev {
+            if key == egui::Key::Escape {
+                app.kb_capture = None;
+                app.kb_error = None;
+            } else if let Some(code) = crate::app::keybinds::encode(mods, key) {
+                match crate::app::keybinds::validate(&app.settings_draft.keybindings, &action, &code)
+                {
+                    Ok(()) => {
+                        app.settings_draft.keybindings.insert(action.clone(), code);
+                        app.kb_capture = None;
+                        app.kb_error = None;
+                    }
+                    Err(msg) => app.kb_error = Some(msg),
+                }
+            } else {
+                app.kb_error = Some(
+                    t(
+                        "该键为系统保留键，或使用了不支持的组合（仅支持单键 / Ctrl+键）",
+                        "Reserved key, or unsupported combo (plain keys / Ctrl+key only)",
+                    )
+                    .to_string(),
+                );
+            }
+        }
+    }
+
     dim_backdrop(ctx);
     egui::Window::new(t("设置", "Settings"))
         .collapsible(false)
@@ -426,6 +485,8 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     }
                     if ui.button(t("取消", "Cancel")).clicked() {
                         // Discard draft, keep existing config.
+                        app.kb_capture = None;
+                        app.kb_error = None;
                         app.state.show_settings = false;
                     }
                 });
@@ -464,6 +525,53 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         d.language = lang.code().to_string();
                         ui.end_row();
                     });
+
+                // 快捷键 (Shortcuts, PRD 7.2.1 / UI spec 5.3.2): click a key
+                // box, press the new key; conflicts show inline and block.
+                section(ui, t("快捷键", "Shortcuts"));
+                ui.label(
+                    RichText::new(t(
+                        "点击某行的按键框后按下新键（Esc 取消）。Esc / Home / End / 数字跳片 / Ctrl+0 / Ctrl+批量键 / F11 / Ctrl+I·O 为系统保留键。",
+                        "Click a key box then press the new key (Esc cancels). Esc / Home / End / digit jump / Ctrl+0 / Ctrl+batch / F11 / Ctrl+I-O are reserved.",
+                    ))
+                    .size(12.0)
+                    .color(theme::TEXT_WEAK),
+                );
+                egui::Grid::new("set_keys")
+                    .num_columns(2)
+                    .spacing([16.0, 5.0])
+                    .show(ui, |ui| {
+                        for (code, zh, en) in crate::app::keybinds::ACTIONS {
+                            ui.label(RichText::new(t(zh, en)).size(13.0).color(theme::TEXT));
+                            let capturing = app.kb_capture.as_deref() == Some(*code);
+                            let label = if capturing {
+                                t("按下新键…", "Press a key…").to_string()
+                            } else {
+                                crate::app::keybinds::effective_codes(&app.settings_draft.keybindings, code)
+                                    .iter()
+                                    .map(|c| crate::app::keybinds::display(c))
+                                    .collect::<Vec<_>>()
+                                    .join(" / ")
+                            };
+                            let mut btn = egui::Button::new(RichText::new(label).size(13.0));
+                            if capturing {
+                                btn = btn.stroke(egui::Stroke::new(1.0, theme::ACCENT));
+                            }
+                            if ui.add(btn).clicked() {
+                                app.kb_capture = Some((*code).to_string());
+                                app.kb_error = None;
+                            }
+                            ui.end_row();
+                        }
+                    });
+                if let Some(err) = &app.kb_error {
+                    ui.label(RichText::new(err).size(12.0).color(theme::DELETE));
+                }
+                if ui.button(t("恢复默认键位", "Restore default keys")).clicked() {
+                    app.settings_draft.keybindings.clear();
+                    app.kb_capture = None;
+                    app.kb_error = None;
+                }
 
                 section(ui, t("路径与标记", "Paths & Marks"));
                 egui::Grid::new("set_paths")
@@ -591,6 +699,8 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
         });
     if save {
         // Apply draft to live config + persist + switch the UI language.
+        app.kb_capture = None;
+        app.kb_error = None;
         app.state.config = app.settings_draft.clone();
         i18n::set_lang(i18n::Lang::from_code(&app.state.config.language));
         if let Err(e) = crate::config::save(&app.state.config) {
