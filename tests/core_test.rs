@@ -799,3 +799,52 @@ fn import_then_open_workspace_across_connections() {
     let pimg = image::open(pv.unwrap()).unwrap();
     assert!(pimg.width().max(pimg.height()) <= 1920);
 }
+
+#[test]
+fn rotation_override_roundtrip_and_list_mapping() {
+    // PRD 7.2: R / Ctrl+R / Shift+R persist rotation_override (0 = EXIF,
+    // 1..=3 = extra 90/180/270° CW) in the DB and the workspace item mirror.
+    use kaka::app::state::AppState;
+    use kaka::model::{AppConfig, Status};
+
+    let root = temp_root();
+    let db_path = root.join("rot.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+
+    let mut app = AppState::new(db, AppConfig::default());
+    app.open_workspace(&src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc)
+        .unwrap();
+    assert_eq!(app.ws.items.len(), 1);
+    assert_eq!(app.ws.items[0].rotation_override, 0);
+
+    // R → 1, R → 2, Ctrl+R (−1) → 1 → 0; CCW past EXIF wraps to 270°.
+    assert_eq!(app.rotate_current(1).unwrap(), Some(1));
+    assert_eq!(app.rotate_current(1).unwrap(), Some(2));
+    assert_eq!(app.rotate_current(-1).unwrap(), Some(1));
+    assert_eq!(app.rotate_current(-1).unwrap(), Some(0));
+    assert_eq!(app.rotate_current(-1).unwrap(), Some(3), "CCW from EXIF wraps to 270°");
+    assert_eq!(app.rotate_current(0).unwrap(), Some(0), "Shift+R resets to EXIF");
+
+    // The in-memory mirror follows, and the value persists across connections.
+    app.rotate_current(2).unwrap();
+    assert_eq!(app.ws.items[0].rotation_override, 2);
+    app.rotate_current(1).unwrap(); // 2 -> 3
+    let db2 = Db::open(&db_path).unwrap();
+    let items = db::photos::list_items_in_folder(
+        &db2,
+        &src.to_string_lossy(),
+        kaka::model::SortOrder::FilenameAsc,
+    )
+    .unwrap();
+    assert_eq!(items[0].rotation_override, 3);
+    // Rotation must not touch the status (no undo-stack entry either).
+    assert_eq!(items[0].status, Status::Untreated);
+}

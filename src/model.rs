@@ -182,6 +182,10 @@ pub struct PhotoListItem {
     pub decode_failed: bool,
     pub preview_only: bool,
     pub pair_group_id: Option<i64>,
+    /// Manual display rotation on top of the EXIF orientation (PRD 7.2):
+    /// 0 = use EXIF orientation, 1/2/3 = user-rotated 90/180/270° clockwise.
+    /// Never written back to the file.
+    pub rotation_override: i64,
 }
 
 impl PhotoListItem {

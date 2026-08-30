@@ -328,6 +328,35 @@ impl AppState {
         Ok(n)
     }
 
+    /// Rotate the currently displayed photo (PRD 7.2). `delta` = +1 clockwise
+    /// 90°, -1 counter-clockwise 90°, 0 = reset to the EXIF orientation. The
+    /// angle lives only in `rotation_override` (DB + in-memory item) — source
+    /// files and EXIF are never touched. Rotation does NOT enter the undo
+    /// stack (PRD 7.2 reserves that for Q/E/U status changes).
+    /// Returns the new rotation_override (0..=3), or None without a photo.
+    pub fn rotate_current(&mut self, delta: i64) -> anyhow::Result<Option<i64>> {
+        let Some(p) = self.ws.current().cloned() else {
+            return Ok(None);
+        };
+        let next = if delta == 0 {
+            0
+        } else {
+            (p.rotation_override + delta).rem_euclid(4)
+        };
+        self.set_rotation_for(p.id, next)?;
+        Ok(Some(next))
+    }
+
+    /// Persist a photo's rotation_override and mirror it into the in-memory
+    /// workspace item so the preview/thumb strip update immediately.
+    pub fn set_rotation_for(&mut self, photo_id: i64, value: i64) -> anyhow::Result<()> {
+        db::photos::set_rotation(&self.db, photo_id, value)?;
+        if let Some(item) = self.ws.items.iter_mut().find(|p| p.id == photo_id) {
+            item.rotation_override = value;
+        }
+        Ok(())
+    }
+
     /// Handle a thumbnail-strip click: plain click selects one photo and makes it
     /// current; Ctrl+click toggles it into/out of the selection; Shift+click
     /// range-selects from the anchor (PRD 7.9.1).

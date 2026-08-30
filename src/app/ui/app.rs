@@ -143,6 +143,11 @@ pub struct KakaApp {
     // Confirm dialog (generic).
     pub confirm: Option<ConfirmDialog>,
 
+    // 待删框 (PRD 8.1): multi-select scoped to the delete-box grid — separate
+    // from the workspace selection — plus the Shift+click range anchor.
+    pub delete_sel: std::collections::HashSet<i64>,
+    pub delete_anchor: Option<usize>,
+
     // Disk-cache cleaner (PRD 9.4): small incremental cleans run in a
     // background thread, triggered by browsing 50 photos or idling 60s.
     pub cache_clean_rx: Option<Receiver<anyhow::Result<crate::io::cache_clean::CleanStats>>>,
@@ -221,6 +226,8 @@ impl KakaApp {
             last_ws_folder: String::new(),
             startup,
             confirm: None,
+            delete_sel: std::collections::HashSet::new(),
+            delete_anchor: None,
             cache_clean_rx: None,
             cache_clean_running: false,
             cache_clean_full: false,
@@ -695,6 +702,23 @@ impl KakaApp {
             return;
         }
 
+        // Rotation (PRD 7.2): R = CW 90°, Ctrl+R = CCW 90°, Shift+R = back to
+        // the EXIF orientation. Checked before plain R so the modified chords
+        // win. The angle is DB-only (rotation_override) — never written to the
+        // file, and it does not enter the undo stack.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::R)) {
+            self.rotate_current(-1);
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::R)) {
+            self.rotate_current(0);
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::R)) {
+            self.rotate_current(1);
+            return;
+        }
+
         // Ctrl+S save; Ctrl+I / Ctrl+O open import.
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S)) {
             self.save_workspace();
@@ -707,6 +731,31 @@ impl KakaApp {
             self.state.show_import = true;
             return;
         }
+    }
+
+    /// Rotate the current photo and toast the outcome (PRD 4.7).
+    /// `delta`: +1 = CW 90°, -1 = CCW 90°, 0 = reset to EXIF orientation.
+    fn rotate_current(&mut self, delta: i64) {
+        match self.state.rotate_current(delta) {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(e) => {
+                self.toast(
+                    ToastKind::Error,
+                    format!("{}{e}", t("旋转失败：", "Rotation failed: ")),
+                );
+                return;
+            }
+        }
+        self.needs_save = true;
+        let msg = if delta == 0 {
+            t("已重置为 EXIF 方向", "Reset to EXIF orientation").to_string()
+        } else if delta > 0 {
+            t("已顺时针旋转 90°", "Rotated 90° clockwise").to_string()
+        } else {
+            t("已逆时针旋转 90°", "Rotated 90° counter-clockwise").to_string()
+        };
+        self.toast(ToastKind::Info, msg);
     }
 
     /// Batch-apply a status to the current selection (Ctrl+Q/E/U, PRD 7.9.2).

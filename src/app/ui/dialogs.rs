@@ -3,10 +3,11 @@
 use super::app::{ConfirmDialog, KakaApp, ToastKind};
 use crate::i18n::{self, t};
 use super::theme;
-use crate::model::{SortOrder, Status};
+use crate::model::{PhotoListItem, SortOrder, Status};
 use crate::db;
 use chrono::Datelike;
 use eframe::egui::{self, Align2, RichText};
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
@@ -1009,71 +1010,192 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
 }
 
 fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
-    // List all pending-delete photos for the current workspace (status = 1).
+    // All pending-delete photos of the current workspace (status = 1), in
+    // capture-time order so Shift+click range selection is stable (PRD 8.1).
     let folder = app.state.ws.folder_path.clone();
     let items = db::photos::list_items_in_folder(&app.state.db, &folder, SortOrder::CaptureTimeAsc)
         .unwrap_or_default();
     let deleted: Vec<_> = items.into_iter().filter(|p| p.status == Status::Delete).collect();
 
+    // Ctrl+A / Ctrl+Shift+A act on the delete-box grid while it is open
+    // (PRD 8.1). Global shortcuts are already suppressed by the modal guard.
+    if !deleted.is_empty() {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A)) {
+            app.delete_sel = deleted.iter().map(|p| p.id).collect();
+        }
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::A)
+        }) {
+            app.delete_sel.clear();
+            app.delete_anchor = None;
+        }
+    }
+
     dim_backdrop(ctx);
     let mut recycle = false;
+    let mut close = false;
     egui::Window::new(t("待删照片", "Photos to delete"))
         .collapsible(false)
-        .resizable(false)
+        .resizable(true)
+        .default_size([960.0, 640.0])
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([760.0, 520.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
+            let n = deleted.len();
+            let groups = deleted
+                .iter()
+                .filter_map(|p| p.pair_group_id)
+                .collect::<HashSet<i64>>()
+                .len();
             let title = match i18n::lang() {
-                i18n::Lang::Zh => format!("待删照片（{}张）", deleted.len()),
-                i18n::Lang::En => format!("Photos to delete ({})", deleted.len()),
+                i18n::Lang::Zh => format!("待删照片（{n}张）"),
+                i18n::Lang::En => format!("Photos to delete ({n})"),
             };
             ui.label(RichText::new(title).heading().color(theme::TEXT));
-            ui.label(RichText::new(t("最终删除会把这些照片文件移入回收站（可从回收站恢复），并清除数据库记录。", "Final deletion moves these files to the recycle bin (recoverable there) and removes their database records."))
+            if groups > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{}",
+                        match i18n::lang() {
+                            i18n::Lang::Zh => format!("包含 {groups} 组 RAW+JPG"),
+                            i18n::Lang::En => format!("includes {groups} RAW+JPG group(s)"),
+                        }
+                    ))
+                    .size(12.0)
+                    .color(theme::TEXT_WEAK),
+                );
+            }
+            ui.label(RichText::new(
+                t("单击选中 · Ctrl+单击切换 · Shift+单击范围选 · 双击在预览区查看 · 最终删除会移入回收站（可恢复）并清除数据库记录",
+                  "Click to select · Ctrl+click toggle · Shift+click range · double-click to preview · final delete moves files to the recycle bin (recoverable) and removes DB records"))
                 .size(12.0).color(theme::TEXT_WEAK));
             ui.separator();
+
             if deleted.is_empty() {
-                ui.centered_and_justified(|ui| {
+                // Flow-based empty hint. A full-rect `centered_and_justified`
+                // here consumes the whole remaining space and pushes the
+                // separator/summary/action bar out of the window — after
+                // restoring the last photo the 关闭 button became unreachable.
+                ui.vertical_centered(|ui| {
+                    ui.add_space(80.0);
                     ui.label(RichText::new(t("暂无待删照片", "Nothing marked for deletion")).color(theme::TEXT_WEAK));
+                    ui.add_space(80.0);
                 });
             } else {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for p in &deleted {
-                            ui.label(RichText::new(format!("🗑 {}", p.original_filename)).size(13.0).color(theme::TEXT_SECONDARY));
-                        }
-                    });
+                // Thumbnail grid (PRD 8.1 / UI 5.2): cells scale to the window
+                // width, 3–8 per row. The scroll area reserves room for the
+                // bottom bar (separator + summary + buttons) so it can never
+                // be pushed out of the window.
+                let reserved = 110.0f32;
+                let mods = ui.input(|i| i.modifiers);
+                let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
+                let cell_w = 150.0f32;
+                let cols = ((ui.available_width() / (cell_w + 10.0)).floor() as usize).clamp(3, 8);
+                egui::ScrollArea::vertical()
+                    .max_height((ui.available_height() - reserved).max(120.0))
+                    .show(ui, |ui| {
+                    egui::Grid::new("delete_grid")
+                        .spacing([10.0, 10.0])
+                        .num_columns(cols)
+                        .show(ui, |ui| {
+                            for (idx, p) in deleted.iter().enumerate() {
+                                let selected = app.delete_sel.contains(&p.id);
+                                let resp = delete_cell(ui, app, p, selected);
+                                if resp.clicked() {
+                                    delete_select_click(app, &ids, idx, p.id, mods.ctrl, mods.shift);
+                                }
+                                if resp.double_clicked() {
+                                    // Preview stays live behind the modal (UI spec 5.2).
+                                    if let Some(pos) =
+                                        app.state.ws.items.iter().position(|w| w.id == p.id)
+                                    {
+                                        app.state.ws.current_index = pos;
+                                    }
+                                }
+                                if idx % cols == cols - 1 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
                 });
             }
+
             ui.separator();
             let n = deleted.len();
+            let sel = app.delete_sel.len();
+            let freed = deleted.iter().map(|p| p.file_size).sum::<i64>();
+            ui.horizontal(|ui| {
+                let summary = match i18n::lang() {
+                    i18n::Lang::Zh => format!("选中 {sel} 张 · 共 {n} 张 · 预计释放空间 {}",
+                        crate::app::copy::human_bytes(freed)),
+                    i18n::Lang::En => format!("selected {sel} · total {n} · estimated space freed {}",
+                        crate::app::copy::human_bytes(freed)),
+                };
+                ui.label(RichText::new(summary).size(13.0).color(theme::TEXT_SECONDARY));
+            });
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if n > 0 {
-                    // Restore only the marked photos.
+                    // 恢复选中 (PRD 8.2): only enabled with a selection.
+                    let restore_btn = egui::Button::new(
+                        RichText::new(format!("{} ({sel})", t("恢复选中", "Restore selected"))).color(theme::KEEP),
+                    );
+                    if ui.add_enabled(sel > 0, restore_btn).clicked() {
+                        let ids: Vec<i64> = deleted
+                            .iter()
+                            .filter(|p| app.delete_sel.contains(&p.id))
+                            .map(|p| p.id)
+                            .collect();
+                        let _ = db::photos::set_status_batch(&app.state.db, &ids, Status::Untreated);
+                        let _ = app.state.reload_current();
+                        app.delete_sel.clear();
+                        app.delete_anchor = None;
+                        let msg = match i18n::lang() {
+                            i18n::Lang::Zh => format!("已恢复 {sel} 张为未处理"),
+                            i18n::Lang::En => format!("Restored {sel} photo(s) to unprocessed"),
+                        };
+                        app.toast(ToastKind::Success, msg);
+                        app.needs_save = true;
+                    }
+                    // 全部恢复: reset every marked photo (PRD 8.2).
                     if ui
-                        .add(egui::Button::new(RichText::new(format!("{} ({n})", t("全部恢复", "Restore all"))).color(theme::KEEP)))
+                        .add(egui::Button::new(
+                            RichText::new(format!("{} ({n})", t("全部恢复", "Restore all"))).color(theme::KEEP),
+                        ))
                         .clicked()
                     {
                         let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
                         let _ = db::photos::set_status_batch(&app.state.db, &ids, Status::Untreated);
                         let _ = app.state.reload_current();
+                        app.delete_sel.clear();
+                        app.delete_anchor = None;
                         app.state.show_delete_box = false;
                     }
-                    // Final delete: move files to the recycle bin + clear DB records.
+                    // Final delete (PRD 8.3): recycle the files, clear the records.
                     if ui
                         .add(egui::Button::new(
-                            RichText::new(format!("{} ({n})", t("全部移入回收站", "Move all to recycle bin"))).strong().color(egui::Color32::WHITE),
-                        ).fill(theme::DELETE).stroke(egui::Stroke::new(1.0, theme::DELETE)))
+                            RichText::new(format!("{} ({n})", t("全部移入回收站", "Move all to recycle bin")))
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(theme::DELETE)
+                        .stroke(egui::Stroke::new(1.0, theme::DELETE)))
                         .clicked()
                     {
                         recycle = true;
                     }
                 }
                 if ui.button(t("关闭", "Close")).clicked() {
-                    app.state.show_delete_box = false;
+                    close = true;
                 }
             });
         });
+
+    if close {
+        app.delete_sel.clear();
+        app.delete_anchor = None;
+        app.state.show_delete_box = false;
+    }
 
     if recycle {
         let paths: Vec<std::path::PathBuf> =
@@ -1089,16 +1211,33 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
             confirm_label: t("移入回收站", "Recycle").into(),
             danger: true,
             on_confirm: Box::new(move |app| {
-                let ok = crate::io::recycle::move_to_recycle_bin(&paths).is_ok();
+                // PRD 8.3: files that no longer exist are only removed from the
+                // DB and reported separately.
+                let (existing, missing): (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) =
+                    paths.iter().cloned().partition(|p| p.exists());
+                let ok = existing.is_empty()
+                    || crate::io::recycle::move_to_recycle_bin(&existing).is_ok();
                 for id in &ids {
                     let _ = db::photos::delete_photo(&app.state.db, *id);
                 }
                 let _ = app.state.reload_current();
+                app.delete_sel.clear();
+                app.delete_anchor = None;
                 app.state.show_delete_box = false;
                 if ok {
                     let msg = match i18n::lang() {
-                        i18n::Lang::Zh => format!("已将 {n} 张照片移入回收站"),
-                        i18n::Lang::En => format!("Moved {n} photos to the recycle bin"),
+                        i18n::Lang::Zh => format!(
+                            "已将 {} 张照片移入回收站，清理 {} 条记录；{} 张文件已不存在，仅清理数据库记录",
+                            existing.len(),
+                            ids.len(),
+                            missing.len()
+                        ),
+                        i18n::Lang::En => format!(
+                            "Moved {} photo(s) to the recycle bin, removed {} record(s); {} file(s) were already gone — DB records cleaned only",
+                            existing.len(),
+                            ids.len(),
+                            missing.len()
+                        ),
                     };
                     app.toast(ToastKind::Success, msg);
                 } else {
@@ -1108,6 +1247,169 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
             }),
         });
     }
+}
+
+/// Delete-box selection click (PRD 8.1): plain click = select one, Ctrl+click
+/// = toggle, Shift+click = range from the anchor over the capture-time-ordered
+/// grid (`ids`). The selection is scoped to this dialog (`app.delete_sel`),
+/// independent of the workspace selection.
+fn delete_select_click(app: &mut KakaApp, ids: &[i64], idx: usize, id: i64, ctrl: bool, shift: bool) {
+    if shift {
+        let anchor = app.delete_anchor.unwrap_or(idx);
+        let (lo, hi) = (anchor.min(idx), anchor.max(idx));
+        for i in lo..=hi {
+            if let Some(&sel_id) = ids.get(i) {
+                app.delete_sel.insert(sel_id);
+            }
+        }
+        app.delete_anchor = Some(anchor);
+    } else if ctrl {
+        if app.delete_sel.contains(&id) {
+            app.delete_sel.remove(&id);
+        } else {
+            app.delete_sel.insert(id);
+        }
+        app.delete_anchor = Some(idx);
+    } else {
+        app.delete_sel.clear();
+        app.delete_sel.insert(id);
+        app.delete_anchor = Some(idx);
+    }
+}
+
+/// One grid cell: thumbnail + rotation, checkbox, 待删/R+J badges, missing-file
+/// overlay and truncated filename (PRD 8.1 / UI 5.2). Returns the cell response
+/// for click / double-click handling.
+fn delete_cell(
+    ui: &mut egui::Ui,
+    app: &mut KakaApp,
+    p: &PhotoListItem,
+    selected: bool,
+) -> egui::Response {
+    let size = egui::vec2(150.0, 152.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let painter = ui.painter();
+
+    // Image canvas with a filename strip below.
+    let canvas = egui::Rect::from_min_size(
+        rect.min + egui::vec2(6.0, 6.0),
+        egui::vec2(size.x - 12.0, 118.0),
+    );
+    painter.rect_filled(canvas, 0.0, theme::PREVIEW_BG);
+
+    let (tex, needs) = app.textures.texture_for(ui.ctx(), p);
+    if needs {
+        let hash = p.thumb_hash.clone().unwrap_or_default();
+        app.thumbs.enqueue(p.id, &hash, &p.current_path);
+    }
+    let ts = tex.size_vec2();
+    if ts.x > 0.0 && ts.y > 0.0 {
+        // Respect the manual rotation here too (PRD 4.7): swap the fit box for
+        // 90/270 turns, never upscale beyond the cached thumb.
+        let turns = p.rotation_override.rem_euclid(4);
+        let swapped = turns % 2 == 1;
+        let (bw, bh) = if swapped {
+            (canvas.height(), canvas.width())
+        } else {
+            (canvas.width(), canvas.height())
+        };
+        let scale = (bw / ts.x).min(bh / ts.y).min(1.0);
+        let dsize = egui::vec2(ts.x * scale, ts.y * scale);
+        if turns == 0 {
+            painter.image(
+                tex.id(),
+                egui::Rect::from_center_size(canvas.center(), dsize),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            super::view::draw_image_rotated(painter, tex.id(), canvas.center(), dsize, turns);
+        }
+    }
+
+    // 文件丢失 (PRD 8.1 c): dim the canvas + a broken-file hint.
+    let missing = !std::path::Path::new(&p.current_path).exists();
+    if missing {
+        painter.rect_filled(
+            canvas,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(10, 10, 10, 200),
+        );
+        painter.text(
+            canvas.center(),
+            Align2::CENTER_CENTER,
+            t("⚠ 文件丢失", "⚠ File missing"),
+            egui::FontId::proportional(12.0),
+            theme::TEXT_SECONDARY,
+        );
+    }
+
+    // Checkbox, top-left 14x14 (PRD 8.1): accent-filled with a tick when on.
+    let cb = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(14.0, 14.0));
+    if selected {
+        painter.rect_filled(cb, 0.0, theme::ACCENT);
+        painter.text(
+            cb.center(),
+            Align2::CENTER_CENTER,
+            "✓",
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(0x12, 0x12, 0x12),
+        );
+    } else {
+        painter.rect_stroke(cb, 0.0, egui::Stroke::new(1.0, theme::BORDER_2), egui::StrokeKind::Inside);
+    }
+
+    // 待删 badge, top-right (small variant per UI spec 3.5.3).
+    let badge = egui::Rect::from_min_size(
+        egui::pos2(rect.max.x - 36.0, rect.min.y),
+        egui::vec2(36.0, 18.0),
+    );
+    painter.rect_filled(badge, 0.0, theme::DELETE);
+    painter.text(
+        badge.center(),
+        Align2::CENTER_CENTER,
+        t("待删", "Del"),
+        egui::FontId::proportional(10.0),
+        egui::Color32::WHITE,
+    );
+    if p.pair_group_id.is_some() {
+        painter.text(
+            egui::pos2(rect.max.x - 4.0, canvas.max.y - 2.0),
+            Align2::RIGHT_BOTTOM,
+            "R+J",
+            egui::FontId::proportional(10.0),
+            theme::TEXT,
+        );
+    }
+
+    // Filename strip.
+    painter.text(
+        egui::pos2(rect.center().x, canvas.max.y + 9.0),
+        Align2::CENTER_CENTER,
+        truncate_name(&p.original_filename, 22),
+        egui::FontId::proportional(11.0),
+        theme::TEXT_WEAK,
+    );
+
+    // Border: hover = accent 1px (UI spec 5.2 悬停), selected = accent 2px.
+    let stroke = if selected {
+        egui::Stroke::new(2.0, theme::ACCENT)
+    } else if resp.hovered() {
+        egui::Stroke::new(1.0, theme::ACCENT)
+    } else {
+        egui::Stroke::new(1.0, theme::BORDER)
+    };
+    painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+    resp
+}
+
+fn truncate_name(name: &str, max: usize) -> String {
+    let count = name.chars().count();
+    if count <= max {
+        return name.to_string();
+    }
+    let head: String = name.chars().take(max - 1).collect();
+    format!("{head}…")
 }
 
 fn confirm_dialog(app: &mut KakaApp, ctx: &egui::Context) {

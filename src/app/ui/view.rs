@@ -1,7 +1,7 @@
 //! Main window layout (UI Spec 2, 3): top bar, progress, preview, right panel,
 //! thumbnail strip, status bar, empty state.
 
-use super::app::KakaApp;
+use super::app::{KakaApp, ToastKind};
 use super::theme;
 use crate::i18n::t;
 use crate::model::{PhotoListItem, SortOrder, Status};
@@ -307,6 +307,61 @@ fn sep(ui: &mut egui::Ui) {
     ui.label(RichText::new("|").color(theme::BORDER_2));
 }
 
+/// Draw a texture rotated by `turns` × 90° clockwise about `center` (PRD 7.2).
+/// `size` is the UNROTATED drawn size; for 90/270 turns the visible AABB has
+/// swapped axes, so callers compute fit/clamping against the swapped dims and
+/// anchor overlays to that AABB. `turns % 4 == 0` degrades to a plain
+/// axis-aligned image draw. Also used by the delete-box grid (PRD 8.1).
+pub(super) fn draw_image_rotated(
+    painter: &egui::Painter,
+    tex_id: egui::TextureId,
+    center: egui::Pos2,
+    size: egui::Vec2,
+    turns: i64,
+) {
+    let turns = turns.rem_euclid(4);
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    if turns == 0 {
+        painter.image(
+            tex_id,
+            egui::Rect::from_center_size(center, size),
+            uv,
+            egui::Color32::WHITE,
+        );
+        return;
+    }
+    // Screen space is y-down, so this matrix rotates the image clockwise.
+    let angle = turns as f32 * std::f32::consts::FRAC_PI_2;
+    let (sin, cos) = angle.sin_cos();
+    let corners = [
+        egui::vec2(-size.x * 0.5, -size.y * 0.5),
+        egui::vec2(size.x * 0.5, -size.y * 0.5),
+        egui::vec2(size.x * 0.5, size.y * 0.5),
+        egui::vec2(-size.x * 0.5, size.y * 0.5),
+    ];
+    let uvs = [
+        egui::pos2(0.0, 0.0),
+        egui::pos2(1.0, 0.0),
+        egui::pos2(1.0, 1.0),
+        egui::pos2(0.0, 1.0),
+    ];
+    let mut mesh = egui::Mesh::default();
+    // Mesh::default() binds TextureId::Managed(0) — the font atlas. A raw mesh
+    // must set its texture explicitly or it renders atlas garbage.
+    mesh.texture_id = tex_id;
+    let base = mesh.vertices.len() as u32;
+    for (c, uv) in corners.iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: center + egui::vec2(c.x * cos - c.y * sin, c.x * sin + c.y * cos),
+            uv,
+            color: egui::Color32::WHITE,
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 fn render_thumb_strip(app: &mut KakaApp, ui: &mut egui::Ui) {
     let current_id = app.state.ws.current().map(|p| p.id);
     let items_len = app.state.ws.items.len();
@@ -371,15 +426,28 @@ fn thumb_widget(
 
     let ts = tex.size_vec2();
     if ts.x > 0.0 && ts.y > 0.0 {
-        let scale = (img_rect.width() / ts.x).min(img_rect.height() / ts.y);
-        let size = ts * scale;
-        let draw_rect = egui::Rect::from_center_size(img_rect.center(), size);
-        painter.image(
-            tex.id(),
-            draw_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
+        // Sync the manual rotation into the strip (PRD 4.7): for 90/270 turns
+        // the fit box swaps axes so the rotated image still fills the canvas.
+        let turns = item.rotation_override.rem_euclid(4);
+        let swapped = turns % 2 == 1;
+        let (bw, bh) = if swapped {
+            (img_rect.height(), img_rect.width())
+        } else {
+            (img_rect.width(), img_rect.height())
+        };
+        let scale = (bw / ts.x).min(bh / ts.y);
+        let size = egui::vec2(ts.x * scale, ts.y * scale);
+        if turns == 0 {
+            let draw_rect = egui::Rect::from_center_size(img_rect.center(), size);
+            painter.image(
+                tex.id(),
+                draw_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            draw_image_rotated(painter, tex.id(), img_rect.center(), size, turns);
+        }
     }
 
     // Border: current (focus) = 3px accent; selected = 2px blue; else 1px border.
@@ -477,25 +545,29 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
 
             // Pan with Ctrl+drag (PRD 7.4 / M3 更正). The anchor is the image
             // point (fractions 0..1) at the viewport center, so it survives
-            // the preview -> RAW texture swap unchanged.
+            // the preview -> RAW texture swap unchanged. Pan math uses the
+            // rotated AABB (PRD 7.2) so dragging stays screen-natural.
+            let turns = item.rotation_override.rem_euclid(4);
+            let swapped = turns % 2 == 1;
+            let rdims = if swapped { egui::vec2(dims.y, dims.x) } else { dims };
             if ui.input(|i| i.modifiers.ctrl) && resp.dragged() {
                 let d = resp.drag_delta();
                 app.zoom_center.0 =
-                    (app.zoom_center.0 - d.x / dims.x.max(1.0)).clamp(0.0, 1.0);
+                    (app.zoom_center.0 - d.x / rdims.x.max(1.0)).clamp(0.0, 1.0);
                 app.zoom_center.1 =
-                    (app.zoom_center.1 - d.y / dims.y.max(1.0)).clamp(0.0, 1.0);
+                    (app.zoom_center.1 - d.y / rdims.y.max(1.0)).clamp(0.0, 1.0);
             }
             let mut cx = app.zoom_center.0;
             let mut cy = app.zoom_center.1;
             // Keep the image covering the viewport when it is larger; center
             // otherwise (PRD 7.4 平移约束).
-            cx = if dims.x > rect.width() {
-                cx.clamp(rect.width() * 0.5 / dims.x, 1.0 - rect.width() * 0.5 / dims.x)
+            cx = if rdims.x > rect.width() {
+                cx.clamp(rect.width() * 0.5 / rdims.x, 1.0 - rect.width() * 0.5 / rdims.x)
             } else {
                 0.5
             };
-            cy = if dims.y > rect.height() {
-                cy.clamp(rect.height() * 0.5 / dims.y, 1.0 - rect.height() * 0.5 / dims.y)
+            cy = if rdims.y > rect.height() {
+                cy.clamp(rect.height() * 0.5 / rdims.y, 1.0 - rect.height() * 0.5 / rdims.y)
             } else {
                 0.5
             };
@@ -503,15 +575,10 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             app.zoom_anchors.insert(item.id, (cx, cy));
 
             let top_left =
-                egui::pos2(rect.center().x - cx * dims.x, rect.center().y - cy * dims.y);
-            draw_rect = egui::Rect::from_min_size(top_left, dims);
+                egui::pos2(rect.center().x - cx * rdims.x, rect.center().y - cy * rdims.y);
+            draw_rect = egui::Rect::from_min_size(top_left, rdims);
             let shown = full_tex.as_ref().unwrap_or(&tex);
-            painter.image(
-                shown.id(),
-                draw_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
+            draw_image_rotated(painter, shown.id(), draw_rect.center(), dims, turns);
 
             // Zoom status label (PRD 4.6). RAW-specific hints only for RAW
             // files; other formats zoom on the disk preview and just show the
@@ -539,14 +606,21 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             let margin = 24.0;
             let avail = egui::vec2(rect.width() - margin * 2.0, rect.height() - margin * 2.0)
                 .max(egui::vec2(1.0, 1.0));
-            let scale = (avail.x / ts.x).min(avail.y / ts.y);
-            let size = ts * scale;
+            // Manual rotation (PRD 7.2) stacks on top of the EXIF-oriented
+            // texture: for 90/270 turns the fit box and the visible AABB swap,
+            // and badges anchor to the AABB.
+            let turns = item.rotation_override.rem_euclid(4);
+            let swapped = turns % 2 == 1;
+            let (tw, th) = if swapped { (ts.y, ts.x) } else { (ts.x, ts.y) };
+            let scale = (avail.x / tw).min(avail.y / th);
+            let size = egui::vec2(tw * scale, th * scale);
             draw_rect = egui::Rect::from_center_size(rect.center(), size);
-            painter.image(
+            draw_image_rotated(
+                painter,
                 tex.id(),
-                draw_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
+                rect.center(),
+                egui::vec2(ts.x * scale, ts.y * scale),
+                turns,
             );
         }
 
@@ -612,6 +686,23 @@ fn preview_context_menu(
             app.needs_save = true;
         }
         ui.separator();
+        // Rotation (PRD 3.3.2 / 7.2): DB-only display rotation.
+        if ui.button(t("顺时针旋转 90°（R）", "Rotate 90° CW (R)")).clicked() {
+            let _ = app.state.rotate_current(1);
+            app.needs_save = true;
+            app.toast(ToastKind::Info, t("已顺时针旋转 90°", "Rotated 90° clockwise"));
+        }
+        if ui.button(t("逆时针旋转 90°（Ctrl+R）", "Rotate 90° CCW (Ctrl+R)")).clicked() {
+            let _ = app.state.rotate_current(-1);
+            app.needs_save = true;
+            app.toast(ToastKind::Info, t("已逆时针旋转 90°", "Rotated 90° counter-clockwise"));
+        }
+        if ui.button(t("重置旋转（Shift+R）", "Reset rotation (Shift+R)")).clicked() {
+            let _ = app.state.rotate_current(0);
+            app.needs_save = true;
+            app.toast(ToastKind::Info, t("已重置为 EXIF 方向", "Reset to EXIF orientation"));
+        }
+        ui.separator();
         if item.decode_failed && ui.button(t("强制重试 RAW 解码", "Force RAW decode retry")).clicked() {
             app.retry_zoom_decode(item.id);
         }
@@ -670,6 +761,35 @@ fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
                         .size(12.0)
                         .color(theme::ACCENT),
                 );
+            }
+            // Manual rotation state + reset (PRD 3.4 / 4.7).
+            let turns = p.rotation_override.rem_euclid(4);
+            if turns != 0 {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} {}°", t("已旋转", "Rotated"), turns * 90))
+                            .size(12.0)
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                    if ui
+                        .small_button(t("重置（Shift+R）", "Reset (Shift+R)"))
+                        .clicked()
+                    {
+                        let id = p.id;
+                        if let Err(e) = app.state.set_rotation_for(id, 0) {
+                            app.toast(
+                                ToastKind::Error,
+                                format!("{}{e}", t("重置旋转失败：", "Reset rotation failed: ")),
+                            );
+                        } else {
+                            app.toast(
+                                ToastKind::Info,
+                                t("已重置为 EXIF 方向", "Reset to EXIF orientation"),
+                            );
+                        }
+                        app.needs_save = true;
+                    }
+                });
             }
 
             // Histogram (PRD 7.5) — computed lazily from the preview cache.

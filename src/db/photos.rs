@@ -56,6 +56,7 @@ fn map_list_item(r: &Row) -> rusqlite::Result<PhotoListItem> {
         decode_failed: r.get::<_, i64>("decode_failed")? != 0,
         preview_only: r.get::<_, i64>("preview_only")? != 0,
         pair_group_id: r.get("pair_group_id")?,
+        rotation_override: r.get("rotation_override")?,
     })
 }
 
