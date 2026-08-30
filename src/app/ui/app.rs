@@ -672,14 +672,14 @@ impl KakaApp {
 
         // Navigation (remappable).
         if self.fire(ctx, "next_photo") {
-            if self.state.step(1) {
+            if self.advance(1) {
                 self.toast(ToastKind::Info, t("已是最后一张", "Already at the last photo"));
             }
             self.needs_save = true;
             return;
         }
         if self.fire(ctx, "prev_photo") {
-            if self.state.step(-1) {
+            if self.advance(-1) {
                 self.toast(ToastKind::Info, t("已是第一张", "Already at the first photo"));
             }
             self.needs_save = true;
@@ -793,22 +793,16 @@ impl KakaApp {
         if self.fire(ctx, "mark_delete") {
             let changed = self.state.set_status_current(Status::Delete, true).unwrap_or(false);
             self.needs_save = true;
-            if changed {
-                let blocked = self.state.step(1);
-                if blocked {
-                    self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
-                }
+            if changed && self.advance(1) {
+                self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
             }
             return;
         }
         if self.fire(ctx, "mark_reviewed") {
             let changed = self.state.set_status_current(Status::Reviewed, true).unwrap_or(false);
             self.needs_save = true;
-            if changed {
-                let blocked = self.state.step(1);
-                if blocked {
-                    self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
-                }
+            if changed && self.advance(1) {
+                self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
             }
             return;
         }
@@ -844,6 +838,31 @@ impl KakaApp {
             self.state.show_import = true;
             return;
         }
+    }
+
+    /// Advance/recede by `delta`, honoring 筛选到末尾循环跳张 (wrap_at_end,
+    /// PRD 4.1). Returns true when blocked at a boundary (wrap disabled).
+    pub fn advance(&mut self, delta: i64) -> bool {
+        let wrap = self.state.config.wrap_at_end;
+        let before = self.state.ws.current_index as i64;
+        let blocked = self.state.step(delta, wrap);
+        if !blocked && wrap {
+            let after = self.state.ws.current_index as i64;
+            let wrapped = (delta > 0 && after < before) || (delta < 0 && after > before);
+            if wrapped {
+                let msg = if delta > 0 {
+                    t("已循环到第 1 张", "Wrapped to photo 1").to_string()
+                } else {
+                    let n = self.state.ws.items.len();
+                    match i18n::lang() {
+                        i18n::Lang::Zh => format!("已循环到第 {n} 张"),
+                        i18n::Lang::En => format!("Wrapped to photo {n}"),
+                    }
+                };
+                self.toast(ToastKind::Info, msg);
+            }
+        }
+        blocked
     }
 
     /// True if the current binding of `action` was pressed this frame.

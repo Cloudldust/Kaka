@@ -242,21 +242,25 @@ impl AppState {
         Ok(())
     }
 
-    /// Move the current index by `delta`, clamped to the list range.
-    /// Returns whether the move was blocked at a boundary.
-    pub fn step(&mut self, delta: i64) -> bool {
+    /// Move the current index by `delta`.
+    ///
+    /// With `wrap` (筛选到末尾循环跳张, PRD 4.1) the move cycles at the ends:
+    /// last → first / first → last. Without it the move is clamped and the
+    /// call returns true (blocked at a boundary).
+    pub fn step(&mut self, delta: i64, wrap: bool) -> bool {
         if self.ws.items.is_empty() {
             return false;
         }
         let len = self.ws.items.len() as i64;
         let next = self.ws.current_index as i64 + delta;
-        if next < 0 {
-            return true; // at first
+        if (0..len).contains(&next) {
+            self.ws.current_index = next as usize;
+            return false;
         }
-        if next >= len {
-            return true; // at last
+        if !wrap {
+            return true; // blocked at first/last
         }
-        self.ws.current_index = next as usize;
+        self.ws.current_index = if delta > 0 { 0 } else { len as usize - 1 };
         false
     }
 

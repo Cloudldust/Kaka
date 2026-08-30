@@ -517,6 +517,8 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         ui.end_row();
                         ui.checkbox(&mut d.high_dpi_2x, t("高 DPI 2x 缩略图", "High-DPI @2x thumbnails"));
                         ui.end_row();
+                        ui.checkbox(&mut d.wrap_at_end, t("筛选到末尾循环跳张", "Wrap around at the end"));
+                        ui.end_row();
                         ui.label(RichText::new(t("语言", "Language")).size(13.0).color(theme::TEXT_WEAK));
                         let mut lang = i18n::Lang::from_code(&d.language);
                         egui::ComboBox::from_id_salt("set_language")
@@ -1438,7 +1440,7 @@ fn delete_cell(
                 egui::Color32::WHITE,
             );
         } else {
-            super::view::draw_image_rotated(painter, tex.id(), canvas.center(), dsize, turns);
+            super::view::draw_image_rotated(painter, tex.id(), canvas.center(), dsize, turns, egui::Color32::WHITE);
         }
     }
 

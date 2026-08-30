@@ -848,3 +848,44 @@ fn rotation_override_roundtrip_and_list_mapping() {
     // Rotation must not touch the status (no undo-stack entry either).
     assert_eq!(items[0].status, Status::Untreated);
 }
+
+#[test]
+fn step_wrap_at_end_toggle() {
+    use kaka::app::state::AppState;
+    use kaka::model::AppConfig;
+
+    let root = temp_root();
+    let db_path = root.join("wrap.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..3 {
+        make_jpeg(&src.join(format!("DSC_{i:04}.JPG")), [i as u8, 30, 60]);
+    }
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+
+    let mut app = AppState::new(db, AppConfig::default());
+    app.open_workspace(&src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert_eq!(app.ws.items.len(), 3);
+
+    // No wrap: blocked at both ends, index unchanged.
+    app.ws.current_index = 0;
+    assert!(app.step(-1, false), "at first without wrap must be blocked");
+    assert_eq!(app.ws.current_index, 0);
+    app.ws.current_index = 2;
+    assert!(app.step(1, false), "at last without wrap must be blocked");
+    assert_eq!(app.ws.current_index, 2);
+
+    // Wrap: last -> first on forward, first -> last on backward.
+    assert!(!app.step(1, true));
+    assert_eq!(app.ws.current_index, 0, "wrapped from last to first");
+    assert!(!app.step(-1, true));
+    assert_eq!(app.ws.current_index, 2, "wrapped from first to last");
+    // Normal in-range moves are unaffected by the flag.
+    assert!(!app.step(-1, true));
+    assert_eq!(app.ws.current_index, 1);
+}

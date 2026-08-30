@@ -335,6 +335,7 @@ pub(super) fn draw_image_rotated(
     center: egui::Pos2,
     size: egui::Vec2,
     turns: i64,
+    tint: egui::Color32,
 ) {
     let turns = turns.rem_euclid(4);
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -343,7 +344,7 @@ pub(super) fn draw_image_rotated(
             tex_id,
             egui::Rect::from_center_size(center, size),
             uv,
-            egui::Color32::WHITE,
+            tint,
         );
         return;
     }
@@ -401,7 +402,10 @@ fn render_thumb_strip(app: &mut KakaApp, ui: &mut egui::Ui) {
                         let hash = item.thumb_hash.clone().unwrap_or_default();
                         app.thumbs.enqueue(item.id, &hash, &item.current_path);
                     }
-                    let (clicked_item, rect) = thumb_widget(ui, &tex, item, is_current, is_selected);
+                    let dim_reviewed =
+                        app.state.config.dim_reviewed_thumbnails && item.status == Status::Reviewed;
+                    let (clicked_item, rect) =
+                        thumb_widget(ui, &tex, item, is_current, is_selected, dim_reviewed);
                     if is_current && should_center {
                         ui.scroll_to_rect(rect, Some(egui::Align::Center));
                     }
@@ -429,6 +433,7 @@ fn thumb_widget(
     item: &PhotoListItem,
     is_current: bool,
     is_selected: bool,
+    dim_reviewed: bool,
 ) -> (bool, egui::Rect) {
     let size = egui::vec2(110.0, 76.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -454,16 +459,23 @@ fn thumb_widget(
         };
         let scale = (bw / ts.x).min(bh / ts.y);
         let size = egui::vec2(ts.x * scale, ts.y * scale);
+        // 淡化已阅跳过 (PRD 4.2 / UI spec 3.5-4): mute reviewed thumbnails with
+        // a gray tint when the setting is on.
+        let tint = if dim_reviewed {
+            egui::Color32::from_rgb(0xc4, 0xc4, 0xc4)
+        } else {
+            egui::Color32::WHITE
+        };
         if turns == 0 {
             let draw_rect = egui::Rect::from_center_size(img_rect.center(), size);
             painter.image(
                 tex.id(),
                 draw_rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
+                tint,
             );
         } else {
-            draw_image_rotated(painter, tex.id(), img_rect.center(), size, turns);
+            draw_image_rotated(painter, tex.id(), img_rect.center(), size, turns, tint);
         }
     }
 
@@ -595,7 +607,7 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                 egui::pos2(rect.center().x - cx * rdims.x, rect.center().y - cy * rdims.y);
             draw_rect = egui::Rect::from_min_size(top_left, rdims);
             let shown = full_tex.as_ref().unwrap_or(&tex);
-            draw_image_rotated(painter, shown.id(), draw_rect.center(), dims, turns);
+            draw_image_rotated(painter, shown.id(), draw_rect.center(), dims, turns, egui::Color32::WHITE);
 
             // Zoom status label (PRD 4.6). RAW-specific hints only for RAW
             // files; other formats zoom on the disk preview and just show the
@@ -638,6 +650,7 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                 rect.center(),
                 egui::vec2(ts.x * scale, ts.y * scale),
                 turns,
+                egui::Color32::WHITE,
             );
         }
 
@@ -690,12 +703,12 @@ fn preview_context_menu(
     resp.context_menu(|ui| {
         if ui.button(t("标记待删（Q）", "Mark for deletion (Q)")).clicked() {
             let _ = app.state.set_status_current(Status::Delete, true);
-            let _ = app.state.step(1);
+            app.advance(1);
             app.needs_save = true;
         }
         if ui.button(t("标记已阅跳过（E）", "Mark reviewed / skip (E)")).clicked() {
             let _ = app.state.set_status_current(Status::Reviewed, true);
-            let _ = app.state.step(1);
+            app.advance(1);
             app.needs_save = true;
         }
         if ui.button(t("重置为未处理（U）", "Reset to unprocessed (U)")).clicked() {
@@ -850,11 +863,16 @@ fn draw_histogram(app: &mut KakaApp, ui: &mut egui::Ui, photo_id: i64, hash: &st
     let Some(h) = app.state.histogram_for(photo_id) else {
         return;
     };
-    plot_histogram(&painter, rect, h);
+    plot_histogram(&painter, rect, h, app.state.config.show_clipping_warning);
 }
 
 /// Overlay 4 polyline curves (R/G/B/L), plus overflow markers at the edges.
-fn plot_histogram(painter: &egui::Painter, rect: egui::Rect, h: &crate::io::histogram::Histogram) {
+fn plot_histogram(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    h: &crate::io::histogram::Histogram,
+    show_clipping: bool,
+) {
     let w = rect.width();
     let height = rect.height();
     let channels: [([u32; 256], egui::Color32); 4] = [
@@ -875,7 +893,11 @@ fn plot_histogram(painter: &egui::Painter, rect: egui::Rect, h: &crate::io::hist
         painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
     }
 
-    // Overflow warnings (PRD 7.5): red ticks on the clipping edges.
+    // Overflow warnings (PRD 7.5): red ticks on the clipping edges, gated by
+    // the 显示高光/暗部溢出提示 setting.
+    if !show_clipping {
+        return;
+    }
     let warn = 0.03f32;
     if h.black_ratio() > warn {
         let bx = rect.min.x + 3.0;
