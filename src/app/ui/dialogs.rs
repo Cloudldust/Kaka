@@ -44,11 +44,16 @@ pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
                     .stroke(egui::Stroke::new(1.0, theme::BORDER_2))
                     .inner_margin(egui::Margin::symmetric(10, 6))
                     .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!("{}_", app.digit_buffer))
-                                .size(16.0)
-                                .strong()
-                                .color(theme::ACCENT),
+                        ui.add(
+                            // Extend: the right-anchored area leaves ~no wrap
+                            // width, which would stack digits vertically.
+                            egui::Label::new(
+                                RichText::new(format!("{}_", app.digit_buffer))
+                                    .size(16.0)
+                                    .strong()
+                                    .color(theme::ACCENT),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
                         );
                     });
             });

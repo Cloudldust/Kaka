@@ -17,6 +17,7 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
     ("mark_delete", "标记待删", "Mark for deletion"),
     ("mark_reviewed", "标记已阅跳过", "Mark reviewed / skip"),
     ("mark_untreated", "重置为未处理", "Reset to unprocessed"),
+    ("rotate_cw", "顺时针旋转 90°", "Rotate 90° CW"),
     ("next_photo", "下一张", "Next photo"),
     ("prev_photo", "上一张", "Previous photo"),
     ("toggle_zoom", "100% 放大切换", "Toggle 100% zoom"),
@@ -28,7 +29,8 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
 ];
 
 /// Ctrl+ combos reserved for batch marks and import (never bindable).
-const RESERVED_CODES: &[&str] = &["Ctrl+Q", "Ctrl+E", "Ctrl+U", "Ctrl+I", "Ctrl+O"];
+// Ctrl+R (逆时针) is likewise reserved — only plain R is remappable.
+const RESERVED_CODES: &[&str] = &["Ctrl+Q", "Ctrl+E", "Ctrl+U", "Ctrl+R", "Ctrl+I", "Ctrl+O"];
 
 fn is_reserved(code: &str) -> bool {
     RESERVED_CODES.contains(&code)
@@ -41,6 +43,7 @@ pub fn default_codes(action: &str) -> &'static [&'static str] {
         "mark_delete" => &["Q"],
         "mark_reviewed" => &["E"],
         "mark_untreated" => &["U"],
+        "rotate_cw" => &["R"],
         "next_photo" => &["ArrowRight", "D", "Space"],
         "prev_photo" => &["ArrowLeft", "A"],
         "toggle_zoom" => &["Z"],
@@ -165,12 +168,36 @@ fn parse(code: &str) -> Option<(bool, egui::Key)> {
 }
 
 /// Consume the key described by `code` if it was pressed this frame.
+///
+/// Uses EXACT modifier matching — egui's `consume_key` matches logically
+/// (extra Shift/Alt are ignored, see `Modifiers::matches_logically`), which
+/// would make a plain `R` binding swallow Shift+R and Ctrl+R. The egui docs
+/// demand matching most-specific-first; exact matching makes the checks
+/// order-independent instead.
 pub fn consume(ctx: &egui::Context, code: &str) -> bool {
     let Some((ctrl, key)) = parse(code) else {
         return false;
     };
     let mods = if ctrl { egui::Modifiers::CTRL } else { egui::Modifiers::NONE };
-    ctx.input_mut(|i| i.consume_key(mods, key))
+    consume_key_exact(ctx, mods, key)
+}
+
+/// Exact-modifier consume: the pressed key must carry precisely `mods`
+/// (no extra Shift/Alt/Ctrl), so sibling combos can never shadow each other.
+pub fn consume_key_exact(ctx: &egui::Context, mods: egui::Modifiers, key: egui::Key) -> bool {
+    let mut hit = false;
+    ctx.input_mut(|i| {
+        i.events.retain(|e| match e {
+            egui::Event::Key { key: k, pressed: true, repeat: false, modifiers: m, .. }
+                if *k == key && m.matches_exact(mods) =>
+            {
+                hit = true;
+                false
+            }
+            _ => true,
+        });
+    });
+    hit
 }
 
 /// Human-readable binding for buttons and the status-bar hint.

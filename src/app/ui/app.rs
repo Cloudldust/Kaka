@@ -566,7 +566,7 @@ impl KakaApp {
         // Esc chain: cancel digit jump → close dialog → exit fullscreen →
         // clear selection → leave 100% zoom (PRD 7.2). Crash/resume dialogs
         // need an explicit choice and are deliberately not ESC-dismissable.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::NONE, Key::Escape) {
             if !self.digit_buffer.is_empty() {
                 self.digit_buffer.clear();
             } else if self.confirm.is_some() {
@@ -594,7 +594,7 @@ impl KakaApp {
         }
 
         // F11: fullscreen toggle (reserved).
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F11)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::NONE, Key::F11) {
             self.set_fullscreen(ctx, !self.fullscreen);
             return;
         }
@@ -687,13 +687,13 @@ impl KakaApp {
         }
 
         // Home / End (reserved).
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::NONE, Key::Home) {
             self.state.jump_to(0);
             self.toast(ToastKind::Info, t("已跳到第 1 张", "Jumped to photo 1"));
             self.needs_save = true;
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::NONE, Key::End) {
             self.state.jump_to(self.state.ws.items.len().saturating_sub(1));
             let n = self.state.ws.items.len();
             let msg = match i18n::lang() {
@@ -714,7 +714,7 @@ impl KakaApp {
             return;
         }
         if self.fire(ctx, "redo")
-            || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z))
+            || crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL | Modifiers::SHIFT, Key::Z)
         {
             if self.state.redo() {
                 self.toast(ToastKind::Info, t("已重做", "Redone"));
@@ -734,7 +734,7 @@ impl KakaApp {
             self.toast(ToastKind::Info, msg);
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::A)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL | Modifiers::SHIFT, Key::A) {
             self.state.select_all(false);
             self.toast(ToastKind::Info, t("已取消全选", "Deselected all"));
             return;
@@ -755,22 +755,36 @@ impl KakaApp {
             }
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::Num0) {
             self.zoom_active = false;
             self.toast(ToastKind::Info, t("已重置为适配窗口", "Reset to fit"));
             return;
         }
 
+        // Rotation (PRD 7.2 / 4.7): R remappable; Ctrl+R / Shift+R reserved.
+        if self.fire(ctx, "rotate_cw") {
+            self.rotate_current(1);
+            return;
+        }
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::R) {
+            self.rotate_current(-1);
+            return;
+        }
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::SHIFT, Key::R) {
+            self.rotate_current(0);
+            return;
+        }
+
         // Ctrl+Q / Ctrl+E / Ctrl+U → batch apply to the selection (reserved).
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Q)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::Q) {
             self.apply_batch_status(Status::Delete);
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::E)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::E) {
             self.apply_batch_status(Status::Reviewed);
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::U)) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::U) {
             self.apply_batch_status(Status::Untreated);
             return;
         }
@@ -825,9 +839,8 @@ impl KakaApp {
             self.toast(ToastKind::Success, t("工作区已保存", "Workspace saved"));
             return;
         }
-        if ctx.input_mut(|i| {
-            i.consume_key(Modifiers::CTRL, Key::I) || i.consume_key(Modifiers::CTRL, Key::O)
-        }) {
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::I)
+            || crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::O) {
             self.state.show_import = true;
             return;
         }
@@ -841,6 +854,31 @@ impl KakaApp {
             }
         }
         false
+    }
+
+    /// Rotate the current photo by quarter turns (PRD 7.2/4.7): DB-only
+    /// display rotation, never touches files, not undoable (PRD 7.2 例外).
+    fn rotate_current(&mut self, delta: i64) {
+        match self.state.rotate_current(delta) {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(e) => {
+                self.toast(
+                    ToastKind::Error,
+                    format!("{}{e}", t("旋转失败：", "Rotation failed: ")),
+                );
+                return;
+            }
+        }
+        self.needs_save = true;
+        let msg = if delta == 0 {
+            t("已重置为 EXIF 方向", "Reset to EXIF orientation").to_string()
+        } else if delta > 0 {
+            t("已顺时针旋转 90°", "Rotated 90° clockwise").to_string()
+        } else {
+            t("已逆时针旋转 90°", "Rotated 90° counter-clockwise").to_string()
+        };
+        self.toast(ToastKind::Info, msg);
     }
 
     /// Toggle borderless fullscreen (F11 in, Esc out).
