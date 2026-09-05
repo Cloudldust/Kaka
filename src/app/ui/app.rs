@@ -167,6 +167,9 @@ pub struct KakaApp {
     pub digit_started: std::time::Instant,
     /// Borderless fullscreen state (F11 toggles, Esc exits).
     pub fullscreen: bool,
+    /// Free zoom multiplier on top of the 1:1 baseline (Ctrl+滚轮, PRD 7.4
+    /// 补充). Reset to 1.0 whenever Z re-enters the 100% view.
+    pub zoom_scale: f32,
     /// Custom-key capture in progress: the action code being rebound
     /// (设置 → 快捷键). While set, the settings dialog owns the keyboard.
     pub kb_capture: Option<String>,
@@ -255,6 +258,7 @@ impl KakaApp {
             digit_buffer: String::new(),
             digit_started: std::time::Instant::now(),
             fullscreen: false,
+            zoom_scale: 1.0,
             kb_capture: None,
             kb_error: None,
             cache_migrating: false,
@@ -756,6 +760,9 @@ impl KakaApp {
         if self.fire(ctx, "toggle_zoom") {
             self.zoom_active = !self.zoom_active;
             if self.zoom_active {
+                // Re-entering the 100% view always restarts at the 1:1
+                // baseline; Ctrl+滚轮 then adjusts freely from there.
+                self.zoom_scale = 1.0;
                 if let Some(p) = self.state.ws.current().cloned() {
                     self.zoom_center = self
                         .zoom_anchors

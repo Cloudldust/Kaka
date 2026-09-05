@@ -536,7 +536,9 @@ fn thumb_widget(
 
 fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-    let painter = ui.painter();
+    // Owned clone: the minimap below allocates widgets through `ui` while the
+    // painter keeps drawing into the same clip rect.
+    let painter = ui.painter().clone();
     painter.rect_filled(rect, 0.0, theme::PREVIEW_BG);
 
     let Some(item) = app.state.ws.current().cloned() else {
@@ -554,6 +556,9 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
         app.thumbs.enqueue(item.id, &hash, &item.current_path);
     }
     let ts = tex.size_vec2();
+    // 视口小地图 (PRD 4.6): set in the 100% branch, painted last so it sits
+    // above photo and badges. (tex_id, image AABB on screen, map box, turns)
+    let mut map_hud: Option<(egui::TextureId, egui::Rect, egui::Rect, i64)> = None;
     if ts.x > 0.0 && ts.y > 0.0 {
         let draw_rect;
         if app.zoom_active {
@@ -562,7 +567,7 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             // stretched into the RAW's true dimensions, so the framing is
             // already correct and the swap to sharp pixels is seamless.
             let full_tex = app.zoom_texture(&item);
-            let dims = full_tex
+            let raw_dims = full_tex
                 .as_ref()
                 .map(|t| t.size_vec2())
                 .or_else(|| {
@@ -571,6 +576,12 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                         .map(|(w, h)| egui::vec2(*w as f32, *h as f32))
                 })
                 .unwrap_or(ts);
+            // True 100% (PRD 7.4): 1 image pixel = 1 PHYSICAL screen pixel.
+            // egui works in logical points and multiplies by pixels_per_point
+            // on render, so divide — otherwise a 2K screen at 125/150% scaling
+            // silently magnifies the image and 100% differs between screens.
+            let ppp = ui.ctx().pixels_per_point();
+            let dims = raw_dims / ppp;
 
             // Pan with Ctrl+drag (PRD 7.4 / M3 更正). The anchor is the image
             // point (fractions 0..1) at the viewport center, so it survives
@@ -579,50 +590,150 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             let turns = item.rotation_override.rem_euclid(4);
             let swapped = turns % 2 == 1;
             let rdims = if swapped { egui::vec2(dims.y, dims.x) } else { dims };
-            if ui.input(|i| i.modifiers.ctrl) && resp.dragged() {
+            // Effective on-screen AABB = 1:1 baseline × wheel zoom scale.
+            // Computed up front: the wheel anchor, pan sensitivity and the
+            // clamp all must work in the same scaled space.
+            let rdims_eff = rdims * app.zoom_scale;
+
+            // Ctrl+滚轮自由缩放（PRD 7.4 补充）: geometric stepping like the
+            // Windows Photo Viewer — each wheel detent multiplies or divides
+            // the zoom by exactly 1.1, fine-grained at low zoom and responsive
+            // at high zoom. Cursor-anchored; range 10%..800%. Wheel deltas
+            // arrive in different units per device (lines / points / pages)
+            // and are normalized to detents first.
+            let notches = ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::MouseWheel { unit, delta, modifiers, .. } if modifiers.ctrl => {
+                            let y = delta.y;
+                            Some(match unit {
+                                egui::MouseWheelUnit::Line => y,
+                                egui::MouseWheelUnit::Point => y / (53.0 * ppp),
+                                egui::MouseWheelUnit::Page => y * 3.0,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .sum::<f32>()
+            });
+            if notches != 0.0 && resp.hovered() {
+                let old_eff = rdims * app.zoom_scale;
+                app.zoom_scale = (app.zoom_scale * 1.1f32.powf(notches)).clamp(0.1, 8.0);
+                let new_eff = rdims * app.zoom_scale;
+                // Cursor-anchored: keep the image point under the cursor fixed.
+                if let Some(pos) = resp.hover_pos() {
+                    let off = pos - rect.center();
+                    let under = egui::vec2(off.x / old_eff.x, off.y / old_eff.y)
+                        + egui::vec2(app.zoom_center.0, app.zoom_center.1);
+                    app.zoom_center.0 = (under.x - off.x / new_eff.x).clamp(0.0, 1.0);
+                    app.zoom_center.1 = (under.y - off.y / new_eff.y).clamp(0.0, 1.0);
+                }
+            }
+
+            // 视口小地图 (PRD 4.6 / UI 3.3.1): bottom-right overview; click or
+            // drag jumps the viewport. The rect is stored and painted after
+            // the badges. Only when the image overflows the viewport.
+            let map_fit = egui::vec2(96.0, 60.0); // PRD: < 100x60
+            let aspect = rdims.x / rdims.y.max(1.0);
+            let (mw, mh) = if aspect >= map_fit.x / map_fit.y {
+                (map_fit.x, map_fit.x / aspect)
+            } else {
+                (map_fit.y * aspect, map_fit.y)
+            };
+            let map_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - 12.0 - mw, rect.max.y - 12.0 - mh),
+                egui::vec2(mw, mh),
+            );
+            let map_resp = ui.allocate_rect(map_rect, egui::Sense::click_and_drag());
+            let map_hit = map_resp.clicked() || map_resp.dragged();
+            if map_hit {
+                if let Some(pos) = map_resp.interact_pointer_pos() {
+                    app.zoom_center.0 =
+                        ((pos.x - map_rect.min.x) / map_rect.width()).clamp(0.0, 1.0);
+                    app.zoom_center.1 =
+                        ((pos.y - map_rect.min.y) / map_rect.height()).clamp(0.0, 1.0);
+                }
+            }
+
+            if ui.input(|i| i.modifiers.ctrl) && resp.dragged() && !map_resp.dragged() {
+                // Divide by the SCALED size so the image tracks the cursor
+                // 1:1 at any zoom level (was stuck at the 1:1 baseline, which
+                // flung the view to the edges at high magnification).
                 let d = resp.drag_delta();
                 app.zoom_center.0 =
-                    (app.zoom_center.0 - d.x / rdims.x.max(1.0)).clamp(0.0, 1.0);
+                    (app.zoom_center.0 - d.x / rdims_eff.x.max(1.0)).clamp(0.0, 1.0);
                 app.zoom_center.1 =
-                    (app.zoom_center.1 - d.y / rdims.y.max(1.0)).clamp(0.0, 1.0);
+                    (app.zoom_center.1 - d.y / rdims_eff.y.max(1.0)).clamp(0.0, 1.0);
             }
             let mut cx = app.zoom_center.0;
             let mut cy = app.zoom_center.1;
             // Keep the image covering the viewport when it is larger; center
-            // otherwise (PRD 7.4 平移约束).
-            cx = if rdims.x > rect.width() {
-                cx.clamp(rect.width() * 0.5 / rdims.x, 1.0 - rect.width() * 0.5 / rdims.x)
+            // otherwise (PRD 7.4 平移约束). Must clamp against the SCALED size
+            // (rdims_eff) — clamping to the 1:1 baseline would pin the pan
+            // range to the 100% window and leave outer regions unreachable
+            // after Ctrl+滚轮.
+            cx = if rdims_eff.x > rect.width() {
+                cx.clamp(
+                    rect.width() * 0.5 / rdims_eff.x,
+                    1.0 - rect.width() * 0.5 / rdims_eff.x,
+                )
             } else {
                 0.5
             };
-            cy = if rdims.y > rect.height() {
-                cy.clamp(rect.height() * 0.5 / rdims.y, 1.0 - rect.height() * 0.5 / rdims.y)
+            cy = if rdims_eff.y > rect.height() {
+                cy.clamp(
+                    rect.height() * 0.5 / rdims_eff.y,
+                    1.0 - rect.height() * 0.5 / rdims_eff.y,
+                )
             } else {
                 0.5
             };
             app.zoom_center = (cx, cy);
             app.zoom_anchors.insert(item.id, (cx, cy));
 
-            let top_left =
-                egui::pos2(rect.center().x - cx * rdims.x, rect.center().y - cy * rdims.y);
-            draw_rect = egui::Rect::from_min_size(top_left, rdims);
+            let top_left = egui::pos2(
+                rect.center().x - cx * rdims_eff.x,
+                rect.center().y - cy * rdims_eff.y,
+            );
+            draw_rect = egui::Rect::from_min_size(top_left, rdims_eff);
             let shown = full_tex.as_ref().unwrap_or(&tex);
-            draw_image_rotated(painter, shown.id(), draw_rect.center(), dims, turns, egui::Color32::WHITE);
+            draw_image_rotated(
+                &painter,
+                shown.id(),
+                draw_rect.center(),
+                dims * app.zoom_scale,
+                turns,
+                egui::Color32::WHITE,
+            );
+            if rdims_eff.x > rect.width() || rdims_eff.y > rect.height() {
+                map_hud = Some((shown.id(), draw_rect, map_rect, turns));
+            }
 
-            // Zoom status label (PRD 4.6). RAW-specific hints only for RAW
-            // files; other formats zoom on the disk preview and just show the
-            // plain 100% marker.
+            // Zoom status label (PRD 4.6): current magnification, with
+            // RAW-specific hints only for RAW files.
             let is_raw = crate::io::format::is_raw(std::path::Path::new(&item.current_path));
+            let pct = (app.zoom_scale * 100.0).round() as i64;
             let status = if !is_raw {
-                "100%".to_string()
-            } else if full_tex.is_some() {
-                t("100% · RAW 原生像素", "100% · RAW pixels").to_string()
-            } else if app.zoom_worker.is_pending(item.id) {
-                t("100% · RAW 解码中…（先以内嵌预览显示）", "100% · decoding RAW… (embedded preview)").to_string()
-            } else if item.decode_failed {
-                t("100% · RAW 解码失败，显示内嵌预览（右键可重试）", "100% · RAW decode failed — embedded preview (right-click to retry)").to_string()
+                format!("{pct}%")
             } else {
-                "100%".to_string()
+                let note = if full_tex.is_some() {
+                    t("RAW 原生像素", "RAW pixels")
+                } else if app.zoom_worker.is_pending(item.id) {
+                    t("RAW 解码中…（先以内嵌预览显示）", "decoding RAW… (embedded preview)")
+                } else if item.decode_failed {
+                    t(
+                        "RAW 解码失败，显示内嵌预览（右键可重试）",
+                        "RAW decode failed — embedded preview (right-click to retry)",
+                    )
+                } else {
+                    ""
+                };
+                if note.is_empty() {
+                    format!("{pct}%")
+                } else {
+                    format!("{pct}% · {note}")
+                }
             };
             painter.text(
                 egui::pos2(rect.min.x + 8.0, rect.min.y + 8.0),
@@ -645,7 +756,7 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             let size = egui::vec2(tw * scale, th * scale);
             draw_rect = egui::Rect::from_center_size(rect.center(), size);
             draw_image_rotated(
-                painter,
+                &painter,
                 tex.id(),
                 rect.center(),
                 egui::vec2(ts.x * scale, ts.y * scale),
@@ -688,8 +799,59 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
         }
     }
 
+    // 视口小地图 (PRD 4.6): painted last so it sits above photo and badges.
+    if let Some((tex_id, draw_rect, map_rect, turns)) = map_hud {
+        let visible = rect.intersect(draw_rect);
+        draw_viewport_minimap(&painter, tex_id, draw_rect, visible, map_rect, turns);
+    }
+
     // Right-click menu on the preview (PRD 3.3.2, core subset).
     preview_context_menu(app, ui, &resp, &item);
+}
+
+/// 视口小地图 (PRD 4.6 / UI 3.3.1): a rotated overview in the bottom-right
+/// corner. The visible viewport region is drawn bright while the rest stays
+/// under a semi-transparent mask; click or drag jumps the viewport (the
+/// interaction itself is handled in `render_preview` before the pan logic).
+fn draw_viewport_minimap(
+    painter: &egui::Painter,
+    tex_id: egui::TextureId,
+    draw_rect: egui::Rect,
+    visible: egui::Rect,
+    map_rect: egui::Rect,
+    turns: i64,
+) {
+    // The on-screen AABB already includes the free-zoom scale.
+    let rdims = draw_rect.size();
+    // Overview image, rotated exactly like the main view and aspect-fitted so
+    // its AABB equals the map box.
+    let map_img_size = if turns % 2 == 1 {
+        egui::vec2(map_rect.height(), map_rect.width())
+    } else {
+        map_rect.size()
+    };
+    draw_image_rotated(painter, tex_id, map_rect.center(), map_img_size, turns, egui::Color32::WHITE);
+
+    // Mask everything, then re-draw the visible region bright (clipped).
+    painter.rect_filled(map_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 0x88));
+
+    let fx = |x: f32| ((x - draw_rect.min.x) / rdims.x.max(1.0)).clamp(0.0, 1.0);
+    let fy = |y: f32| ((y - draw_rect.min.y) / rdims.y.max(1.0)).clamp(0.0, 1.0);
+    let p0 = egui::pos2(
+        map_rect.min.x + fx(visible.min.x) * map_rect.width(),
+        map_rect.min.y + fy(visible.min.y) * map_rect.height(),
+    );
+    let p1 = egui::pos2(
+        map_rect.min.x + fx(visible.max.x) * map_rect.width(),
+        map_rect.min.y + fy(visible.max.y) * map_rect.height(),
+    );
+    let sub = egui::Rect::from_min_max(p0, p1);
+
+    let clipped = painter.with_clip_rect(sub);
+    draw_image_rotated(&clipped, tex_id, map_rect.center(), map_img_size, turns, egui::Color32::WHITE);
+
+    painter.rect_stroke(sub, 0.0, egui::Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+    painter.rect_stroke(map_rect, 0.0, egui::Stroke::new(1.0, theme::BORDER_2), egui::StrokeKind::Inside);
 }
 
 /// Right-click menu for the preview area (PRD 3.3.2): marking, RAW retry,
