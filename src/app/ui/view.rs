@@ -590,11 +590,13 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             let turns = item.rotation_override.rem_euclid(4);
             let swapped = turns % 2 == 1;
             let rdims = if swapped { egui::vec2(dims.y, dims.x) } else { dims };
-            // Effective on-screen AABB = 1:1 baseline × wheel zoom scale.
-            // Computed up front: the wheel anchor, pan sensitivity and the
-            // clamp all must work in the same scaled space.
-            let rdims_eff = rdims * app.zoom_scale;
-
+            // Effective on-screen AABB = 1:1 baseline × animated zoom scale.
+            // The wheel updates TARGET values only; the displayed values ease
+            // toward them below, so each detent (and the clamp/fit handoffs)
+            // glides instead of jumping. Computed after the easing step: the
+            // wheel anchor, pan sensitivity and the clamp all must work in the
+            // same scaled space.
+            //
             // Ctrl+滚轮自由缩放（PRD 7.4 补充）: geometric stepping like the
             // Windows Photo Viewer — each wheel detent multiplies or divides
             // the zoom by exactly 1.1, fine-grained at low zoom and responsive
@@ -618,18 +620,38 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                     .sum::<f32>()
             });
             if notches != 0.0 && resp.hovered() {
-                let old_eff = rdims * app.zoom_scale;
-                app.zoom_scale = (app.zoom_scale * 1.1f32.powf(notches)).clamp(0.1, 8.0);
-                let new_eff = rdims * app.zoom_scale;
-                // Cursor-anchored: keep the image point under the cursor fixed.
+                let old_eff = rdims * app.zoom_scale_target;
+                app.zoom_scale_target =
+                    (app.zoom_scale_target * 1.1f32.powf(notches)).clamp(0.1, 8.0);
+                let new_eff = rdims * app.zoom_scale_target;
+                // Cursor-anchored: keep the image point under the cursor fixed
+                // (anchor math runs entirely in target space).
                 if let Some(pos) = resp.hover_pos() {
                     let off = pos - rect.center();
                     let under = egui::vec2(off.x / old_eff.x, off.y / old_eff.y)
-                        + egui::vec2(app.zoom_center.0, app.zoom_center.1);
-                    app.zoom_center.0 = (under.x - off.x / new_eff.x).clamp(0.0, 1.0);
-                    app.zoom_center.1 = (under.y - off.y / new_eff.y).clamp(0.0, 1.0);
+                        + egui::vec2(app.zoom_center_target.0, app.zoom_center_target.1);
+                    app.zoom_center_target.0 = (under.x - off.x / new_eff.x).clamp(0.0, 1.0);
+                    app.zoom_center_target.1 = (under.y - off.y / new_eff.y).clamp(0.0, 1.0);
                 }
             }
+
+            // Ease the displayed state toward the targets (exponential
+            // smoothing, ~60ms half-life): wheel detents, the pan-clamp
+            // handoff and the fit-crossing all become short glides. Pan
+            // writes the displayed value directly and syncs the target, so
+            // dragging stays 1:1 with no easing lag.
+            let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.1);
+            let k = 1.0 - (-dt / 0.05f32).exp();
+            app.zoom_scale += (app.zoom_scale_target - app.zoom_scale) * k;
+            app.zoom_center.0 += (app.zoom_center_target.0 - app.zoom_center.0) * k;
+            app.zoom_center.1 += (app.zoom_center_target.1 - app.zoom_center.1) * k;
+            let settled = (app.zoom_scale - app.zoom_scale_target).abs() < 0.0005
+                && (app.zoom_center.0 - app.zoom_center_target.0).abs() < 0.0005
+                && (app.zoom_center.1 - app.zoom_center_target.1).abs() < 0.0005;
+            if !settled {
+                ui.ctx().request_repaint();
+            }
+            let rdims_eff = rdims * app.zoom_scale;
 
             // 视口小地图 (PRD 4.6 / UI 3.3.1): bottom-right overview; click or
             // drag jumps the viewport. The rect is stored and painted after
@@ -649,9 +671,10 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             let map_hit = map_resp.clicked() || map_resp.dragged();
             if map_hit {
                 if let Some(pos) = map_resp.interact_pointer_pos() {
-                    app.zoom_center.0 =
+                    // Target only: the view glides to the clicked spot.
+                    app.zoom_center_target.0 =
                         ((pos.x - map_rect.min.x) / map_rect.width()).clamp(0.0, 1.0);
-                    app.zoom_center.1 =
+                    app.zoom_center_target.1 =
                         ((pos.y - map_rect.min.y) / map_rect.height()).clamp(0.0, 1.0);
                 }
             }
@@ -659,12 +682,13 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
             if ui.input(|i| i.modifiers.ctrl) && resp.dragged() && !map_resp.dragged() {
                 // Divide by the SCALED size so the image tracks the cursor
                 // 1:1 at any zoom level (was stuck at the 1:1 baseline, which
-                // flung the view to the edges at high magnification).
+                // flung the view to the edges at high magnification). Pan is
+                // immediate: displayed and target move together.
                 let d = resp.drag_delta();
-                app.zoom_center.0 =
-                    (app.zoom_center.0 - d.x / rdims_eff.x.max(1.0)).clamp(0.0, 1.0);
-                app.zoom_center.1 =
-                    (app.zoom_center.1 - d.y / rdims_eff.y.max(1.0)).clamp(0.0, 1.0);
+                let nx = (app.zoom_center.0 - d.x / rdims_eff.x.max(1.0)).clamp(0.0, 1.0);
+                let ny = (app.zoom_center.1 - d.y / rdims_eff.y.max(1.0)).clamp(0.0, 1.0);
+                app.zoom_center = (nx, ny);
+                app.zoom_center_target = (nx, ny);
             }
             let mut cx = app.zoom_center.0;
             let mut cy = app.zoom_center.1;
@@ -697,7 +721,18 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
                 rect.center().y - cy * rdims_eff.y,
             );
             draw_rect = egui::Rect::from_min_size(top_left, rdims_eff);
-            let shown = full_tex.as_ref().unwrap_or(&tex);
+            // When zoomed out far enough that the RAW texture displays below
+            // the preview's own resolution, draw the PREVIEW texture instead:
+            // it is the higher-quality rendition at that size (one Lanczos
+            // downscale vs a 5×+ mipmap chain, which washes out fine grain
+            // like beach sand) and is pixel-identical to the fit view — so
+            // zooming out never shifts the look (LR-like). Past the
+            // threshold the full-resolution pixels carry real extra detail.
+            let drawn_device_w = raw_dims.x * app.zoom_scale;
+            let shown = match full_tex.as_ref() {
+                Some(ft) if drawn_device_w > ts.x => ft,
+                _ => &tex,
+            };
             draw_image_rotated(
                 &painter,
                 shown.id(),

@@ -10,7 +10,18 @@ gui = ["dep:eframe", "dep:egui", "dep:rfd"]
 [dependencies]
 chrono = "0.4.45"
 dirs = "6.0.0"
-eframe = { version = "0.36.1", optional = true }
+# glow renderer (not the wgpu default): it is the only backend that honors
+# TextureOptions::mipmap_mode, which photo textures need for smooth heavy
+# minification (Z view zoomed out, thumbnail strip).
+eframe = { version = "0.36.1", optional = true, default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "links",
+    "glow",
+    "wayland",
+    "web_screen_reader",
+    "x11",
+] }
 egui = { version = "0.36.1", optional = true }
 kamadak-exif = "0.6.1"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "ico", "bmp"] }

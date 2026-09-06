@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn temp_root() -> PathBuf {
+    // Copy-mode tests trigger the disk-space pre-check; they must not depend
+    // on how full the temp drive happens to be.
+    kaka::app::copy::disable_disk_guard_for_tests();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("kaka_test_{}_{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();

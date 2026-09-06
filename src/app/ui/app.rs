@@ -102,6 +102,11 @@ pub struct KakaApp {
     // preview -> RAW texture swap unchanged (无缝替换).
     pub zoom_active: bool,
     pub zoom_center: (f32, f32),
+    /// Target state the animated display values (`zoom_scale`/`zoom_center`)
+    /// ease toward. The wheel writes targets only; easing turns the per-detent
+    /// steps and clamp/fit handoffs into a smooth glide instead of jumps.
+    pub zoom_scale_target: f32,
+    pub zoom_center_target: (f32, f32),
     pub zoom_photo_id: Option<i64>,
     /// Full-resolution RAW decoder for the 100% view (PRD 7.4 视口解码).
     pub zoom_worker: ZoomWorker,
@@ -238,6 +243,8 @@ impl KakaApp {
             import_clear_card: false,
             zoom_active: false,
             zoom_center: (0.5, 0.5),
+            zoom_scale_target: 1.0,
+            zoom_center_target: (0.5, 0.5),
             zoom_photo_id: None,
             zoom_worker: ZoomWorker::new(),
             zoom_tex: MemLru::new(ZOOM_TEX_CAP_BYTES),
@@ -776,14 +783,18 @@ impl KakaApp {
             self.zoom_active = !self.zoom_active;
             if self.zoom_active {
                 // Re-entering the 100% view always restarts at the 1:1
-                // baseline; Ctrl+滚轮 then adjusts freely from there.
+                // baseline; Ctrl+滚轮 then adjusts freely from there. Both the
+                // animated values and their targets are snapped so Z feels
+                // instant (wheel easing state must not carry over).
                 self.zoom_scale = 1.0;
+                self.zoom_scale_target = 1.0;
                 if let Some(p) = self.state.ws.current().cloned() {
                     self.zoom_center = self
                         .zoom_anchors
                         .get(&p.id)
                         .copied()
                         .unwrap_or((0.5, 0.5));
+                    self.zoom_center_target = self.zoom_center;
                     self.request_zoom_decode(&p);
                 }
             }
@@ -1262,13 +1273,29 @@ impl KakaApp {
     /// Queue a full-resolution decode for `item` if it is eligible (RAW /
     /// plainly decodable, not flagged decode_failed, not already in flight).
     pub fn request_zoom_decode(&mut self, item: &PhotoListItem) {
-        if item.decode_failed || self.zoom_worker.is_pending(item.id) {
-            return;
-        }
         if !zoom_full_decode_eligible(&item.current_path) {
             return;
         }
-        self.zoom_worker.request(item.id, std::path::Path::new(&item.current_path));
+        // Seed the dimension hint synchronously (header-only EXIF read, once
+        // per photo) so the VERY FIRST zoom frame already frames at the RAW's
+        // true size. Without it the preview shows at its own size — often the
+        // 256px thumbnail when the 1920px preview cache is not generated yet —
+        // until the worker's Dims message lands a few frames later, which
+        // reads as a jarring tiny → stretched → sharp double jump. Also
+        // benefits decode_failed photos, which never get a worker Dims msg.
+        if !self.zoom_dims.contains_key(&item.id) {
+            if let Some((w, h)) =
+                crate::io::exif::pixel_dims(std::path::Path::new(&item.current_path))
+            {
+                self.zoom_dims.insert(item.id, (w, h));
+            }
+        }
+        if item.decode_failed || self.zoom_worker.is_pending(item.id) {
+            return;
+        }
+        let hash = item.thumb_hash.clone().unwrap_or_default();
+        self.zoom_worker
+            .request(item.id, std::path::Path::new(&item.current_path), &hash);
     }
 
     /// 强制重试 RAW 解码 (PRD 7.4.3): clear the persisted decode_failed flag
@@ -1311,7 +1338,7 @@ impl KakaApp {
                         let tex = ctx.load_texture(
                             format!("zoom-{photo_id}"),
                             img,
-                            egui::TextureOptions::LINEAR,
+                            super::texture::photo_texture_options(),
                         );
                         let bytes = (d.width as u64) * (d.height as u64) * 4;
                         self.zoom_tex.insert((photo_id, hash), tex, bytes);

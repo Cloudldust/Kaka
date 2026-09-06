@@ -95,10 +95,26 @@ pub fn thumb_exists(hash: &str, dpi_scale: f32) -> bool {
     thumb_path(hash, dpi_scale).exists()
 }
 
+/// The camera-rendered reference image the user actually sees before the RAW
+/// decode lands: the disk preview when it exists (what fit view shows), else
+/// the embedded preview decoded from the RAW. Used by the zoom worker to tone
+/// match the full decode (plain sRGB gamma reads much darker than the camera
+/// rendering — measured mean 71 vs 108 on a D7100 sample).
+pub fn camera_tone_reference(src: &Path, hash: &str) -> Option<image::DynamicImage> {
+    if !hash.is_empty() {
+        let p = preview_path(hash);
+        if p.exists() {
+            if let Ok(img) = image::open(&p) {
+                return Some(img);
+            }
+        }
+    }
+    decode_source(src).ok().flatten()
+}
+
 /// Open an image source for thumbnail/preview generation. For formats the
 /// `image` crate cannot decode (RAW), fall back to the embedded JPEG preview.
-fn decode_source(src: &Path) -> anyhow::Result<Option<image::DynamicImage>> {
-    let mut img = if let Ok(img) = image::open(src) {
+fn decode_source(src: &Path) -> anyhow::Result<Option<image::DynamicImage>> {    let mut img = if let Ok(img) = image::open(src) {
         img
     } else if let Some(bytes) = crate::io::exif::extract_embedded_preview(src) {
         match image::load_from_memory(&bytes) {

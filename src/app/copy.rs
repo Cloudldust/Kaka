@@ -8,7 +8,17 @@ use crate::io::thumbnails;
 use crate::model::{CaptureTimeSource, Photo, Status};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// Test escape hatch for [`check_disk_space`]: integration tests must not
+/// depend on the ambient free space of whatever drive the temp dir lands on.
+static DISK_GUARD_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Disable the disk-space pre-check (integration tests only).
+#[doc(hidden)]
+pub fn disable_disk_guard_for_tests() {
+    DISK_GUARD_DISABLED.store(true, Ordering::SeqCst);
+}
 use std::sync::{mpsc, Arc};
 
 /// How to organize files under the target directory (PRD 6.1.2).
@@ -460,6 +470,11 @@ pub(crate) fn atomic_copy(src: &Path, dest: &Path) -> anyhow::Result<()> {
 
 /// Disk-space pre-check (PRD 6.1.4): free_size >= total_size * 1.05 + 512MB.
 pub(crate) fn check_disk_space(target_dir: &str, total_size: u64) -> anyhow::Result<()> {
+    // Integration tests must not depend on ambient free space of whatever
+    // drive the temp dir happens to land on.
+    if DISK_GUARD_DISABLED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let free = fs4::available_space(target_dir)?;
     let required = (total_size as f64 * 1.05) as u64 + (512u64 << 20);
     if free < required {

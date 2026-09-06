@@ -265,17 +265,123 @@ pub fn pixel_dims(path: &Path) -> Option<(u32, u32)> {
     let file = std::fs::File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file);
     let exif = Reader::new().read_from_container(&mut reader).ok()?;
-    let w = exif
-        .get_field(Tag::ImageWidth, In::PRIMARY)
-        .and_then(short_value)?;
-    let h = exif
-        .get_field(Tag::ImageLength, In::PRIMARY)
-        .and_then(short_value)?;
-    let (w, h) = (w as u32, h as u32);
+    let orient = exif
+        .get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(short_value);
+    // Prefer the Exif sub-IFD's PixelX/YDimension (cameras that record it put
+    // the true size there), then IFD0's ImageWidth/Length.
+    let dim = |tag: Tag| exif.get_field(tag, In::PRIMARY).and_then(short_value);
+    let mut w = dim(Tag::PixelXDimension)
+        .or_else(|| dim(Tag::ImageWidth))
+        .map(|v| v as u32)?;
+    let mut h = dim(Tag::PixelYDimension)
+        .or_else(|| dim(Tag::ImageLength))
+        .map(|v| v as u32)?;
     if w == 0 || h == 0 {
         return None;
     }
+    // NEF quirk (D7100 verified): IFD0's ImageWidth/Length is only the
+    // embedded ~120x160 thumbnail, and the Exif sub-IFD has no PixelX/Y —
+    // the sensor dims live in the raw SubIFD behind TIFF tag 0x014A. A
+    // sub-1000px "full resolution" is never real, so walk the TIFF headers
+    // for the actual dims.
+    if w.max(h) < 1000 {
+        if let Some((tw, th)) = tiff_full_dims(path) {
+            w = tw;
+            h = th;
+        }
+    }
+    if w.max(h) < 1000 {
+        return None;
+    }
+    // EXIF Orientation 5–8 are 90° rotations: PixelX/YDimension describe the
+    // sensor (landscape) while every decoded texture applies the orientation
+    // and is presented portrait. Swap so the dimension hint (Z-key framing,
+    // PRD 7.4) matches what the decode will produce — otherwise the preview
+    // is stretched into the wrong aspect until the decode lands.
+    if let Some(o) = orient {
+        if (5..=8).contains(&o) {
+            std::mem::swap(&mut w, &mut h);
+        }
+    }
     Some((w, h))
+}
+
+/// Walk a TIFF-based RAW's IFD chain (IFD0 → SubIFDs behind tag 0x014A) for
+/// the largest plausible ImageWidth/Length pair — the full sensor dims. Reads
+/// only IFD headers (a few hundred bytes), fast enough for the UI thread.
+/// Returns None for non-TIFF containers (CR3/RAF/ORF magic variants).
+fn tiff_full_dims(path: &Path) -> Option<(u32, u32)> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 8];
+    f.read_exact(&mut head).ok()?;
+    let le = match &head[0..4] {
+        b"II\x2a\x00" => true,
+        b"MM\x00\x2a" => false,
+        _ => return None,
+    };
+    let u16_at =
+        |b: &[u8]| if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) };
+    let u32_at = |b: &[u8]| {
+        if le {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        }
+    };
+
+    let mut best: Option<(u32, u32)> = None;
+    let mut queue = vec![u32_at(&head[4..8])]; // IFD0 offset
+    let mut visited = 0usize;
+    while let Some(off) = queue.pop() {
+        visited += 1;
+        if off == 0 || visited > 8 {
+            continue;
+        }
+        f.seek(std::io::SeekFrom::Start(off as u64)).ok()?;
+        let mut nb = [0u8; 2];
+        f.read_exact(&mut nb).ok()?;
+        let n = u16_at(&nb) as usize;
+        if n == 0 || n > 512 {
+            continue;
+        }
+        let mut buf = vec![0u8; n * 12];
+        f.read_exact(&mut buf).ok()?;
+        let (mut w, mut h) = (0u32, 0u32);
+        for i in 0..n {
+            let e = &buf[i * 12..i * 12 + 12];
+            let (tag, typ, cnt) = (u16_at(&e[0..2]), u16_at(&e[2..4]), u32_at(&e[4..8]));
+            // A count-1 value fits inline in the 4-byte value field
+            // (SHORT in the low half, LONG across all of it).
+            let inline = u32_at(&e[8..12]);
+            match (tag, typ, cnt) {
+                (0x0100, 3, 1) => w = u16_at(&e[8..10]) as u32,
+                (0x0100, 4, 1) => w = inline,
+                (0x0101, 3, 1) => h = u16_at(&e[8..10]) as u32,
+                (0x0101, 4, 1) => h = inline,
+                (0x014A, 4, 1) => queue.push(inline),
+                (0x014A, 4, _) if cnt <= 8 && inline > 0 => {
+                    // SubIFD offset array lives at the value offset.
+                    f.seek(std::io::SeekFrom::Start(inline as u64)).ok()?;
+                    let mut a = vec![0u8; cnt as usize * 4];
+                    if f.read_exact(&mut a).is_ok() {
+                        for k in 0..cnt as usize {
+                            queue.push(u32_at(&a[k * 4..k * 4 + 4]));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if w > 0 && h > 0 {
+            best = match best {
+                Some((bw, bh)) if bw as u64 * bh as u64 >= w as u64 * h as u64 => best,
+                _ => Some((w, h)),
+            };
+        }
+    }
+    best
 }
 
 fn read_abs<R: std::io::Seek + std::io::Read>(
@@ -301,5 +407,127 @@ fn long_value(f: &exif::Field) -> Option<u64> {
         Value::SLong(v) => v.first().map(|&x| x as u64),
         Value::Rational(v) => v.first().map(|r| r.num.max(0) as u64),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal little-endian TIFF with IFD0 entries:
+    /// (tag, type, count, inline value). SHORT count-1 values sit in the low
+    /// half of the 4-byte value field, so writing the full u32 covers both.
+    fn tiff_le(entries: &[(u16, u16, u32, i64)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"II");
+        buf.extend_from_slice(&0x2Au16.to_le_bytes());
+        buf.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, ty, count, val) in entries {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&ty.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(&(*val as u32).to_le_bytes());
+        }
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+        buf
+    }
+
+    /// NEF-style TIFF: IFD0 carries only a small embedded thumbnail's
+    /// dimensions plus a SubIFD pointer (0x014A); the real sensor dims live
+    /// in the SubIFD. Written as a raw TIFF container (like a real NEF).
+    fn write_nef_like(
+        dir: &Path,
+        name: &str,
+        orientation: i64,
+        thumb: (u32, u32),
+        sensor: (u32, u32),
+    ) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let ifd0 = tiff_le(&[
+            (0x0112, 3, 1, orientation),    // Orientation
+            (0x0100, 3, 1, thumb.0 as i64), // ImageWidth  = thumbnail!
+            (0x0101, 3, 1, thumb.1 as i64), // ImageLength = thumbnail!
+            (0x014A, 4, 1, 0),              // SubIFDs offset, patched below
+        ]);
+        let sub_off = ifd0.len() as i64; // SubIFD starts right after IFD0
+        let mut sub = tiff_le(&[
+            (0x0100, 4, 1, sensor.0 as i64),
+            (0x0101, 4, 1, sensor.1 as i64),
+        ]);
+        sub.drain(0..8); // strip the second TIFF header
+        let mut buf = ifd0;
+        let tail = buf.split_off(buf.len() - 4); // drop IFD0's next-IFD zero
+        // Patch the SubIFD pointer (last entry's inline value field).
+        let ptr_at = buf.len() - 4;
+        buf[ptr_at..].copy_from_slice(&(sub_off as u32).to_le_bytes());
+        buf.extend_from_slice(&tail);
+        buf.extend_from_slice(&sub);
+        let path = dir.join(name);
+        std::fs::write(&path, buf).unwrap();
+        path
+    }
+
+    /// Wrap a TIFF blob into a minimal JPEG container (SOI + APP1 Exif + EOI),
+    /// enough for kamadak-exif's container reader.
+    fn jpeg_with_exif(tiff: &[u8]) -> Vec<u8> {
+        let payload_len = 6 + tiff.len(); // "Exif\0\0" + TIFF
+        let mut jpg = vec![0xFF, 0xD8];
+        jpg.extend_from_slice(&[0xFF, 0xE1]);
+        jpg.extend_from_slice(&(payload_len as u16 + 2).to_be_bytes());
+        jpg.extend_from_slice(b"Exif\0\0");
+        jpg.extend_from_slice(tiff);
+        jpg.extend_from_slice(&[0xFF, 0xD9]);
+        jpg
+    }
+
+    fn write_exif_jpg(dir: &Path, name: &str, orientation: i64) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let tiff = tiff_le(&[
+            (0x0112, 3, 1, orientation), // Orientation
+            (0x0100, 3, 1, 8256),        // ImageWidth (PixelXDimension)
+            (0x0101, 3, 1, 5504),        // ImageLength (PixelYDimension)
+        ]);
+        let path = dir.join(name);
+        std::fs::write(&path, jpeg_with_exif(&tiff)).unwrap();
+        path
+    }
+
+    #[test]
+    fn pixel_dims_swaps_for_rotated_orientation() {
+        let dir = std::env::temp_dir().join(format!("kaka_exif_{}", std::process::id()));
+
+        // Orientation 6 (rotate 90° CW): landscape sensor → portrait display.
+        let p = write_exif_jpg(&dir, "o6.jpg", 6);
+        assert_eq!(pixel_dims(&p), Some((5504, 8256)));
+
+        // Orientation 8 (rotate 270° CW): swapped as well.
+        let p = write_exif_jpg(&dir, "o8.jpg", 8);
+        assert_eq!(pixel_dims(&p), Some((5504, 8256)));
+
+        // Orientation 1 (normal) and 4 (flip): sensor order kept.
+        let p = write_exif_jpg(&dir, "o1.jpg", 1);
+        assert_eq!(pixel_dims(&p), Some((8256, 5504)));
+        let p = write_exif_jpg(&dir, "o4.jpg", 4);
+        assert_eq!(pixel_dims(&p), Some((8256, 5504)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pixel_dims_reads_nef_subifd_dims() {
+        let dir = std::env::temp_dir().join(format!("kaka_nef_{}", std::process::id()));
+
+        // NEF layout: IFD0's ImageWidth/Length is a 160x120 thumbnail; the
+        // sensor (6000x4000) sits in the SubIFD behind tag 0x014A.
+        let p = write_nef_like(&dir, "dsc.nef", 8, (160, 120), (6000, 4000));
+        assert_eq!(tiff_full_dims(&p), Some((6000, 4000)));
+        // Orientation 8 swaps to portrait, matching the decoded texture.
+        assert_eq!(pixel_dims(&p), Some((4000, 6000)));
+
+        let p = write_nef_like(&dir, "lscape.nef", 1, (160, 120), (6000, 4000));
+        assert_eq!(pixel_dims(&p), Some((6000, 4000)));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
