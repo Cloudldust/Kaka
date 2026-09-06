@@ -1,7 +1,7 @@
 //! Main window layout (UI Spec 2, 3): top bar, progress, preview, right panel,
 //! thumbnail strip, status bar, empty state.
 
-use super::app::{KakaApp, ToastKind};
+use super::app::{ConfirmDialog, KakaApp, ToastKind};
 use super::theme;
 use crate::i18n::t;
 use crate::model::{PhotoListItem, SortOrder, Status};
@@ -298,6 +298,28 @@ fn render_status_bar(app: &mut KakaApp, ui: &mut egui::Ui) {
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // 选中含丢失记录时的操作提示 (PRD 7.9.2).
+            let missing_in_sel = app
+                .state
+                .ws
+                .items
+                .iter()
+                .filter(|p| p.is_missing() && app.state.ws.selection.contains(&p.id))
+                .count();
+            if missing_in_sel > 0 {
+                ui.label(
+                    RichText::new(match crate::i18n::lang() {
+                        crate::i18n::Lang::Zh => format!(
+                            "选中含 {missing_in_sel} 条丢失记录 · 右键预览可移除"
+                        ),
+                        crate::i18n::Lang::En => format!(
+                            "{missing_in_sel} missing in selection · right-click preview to remove"
+                        ),
+                    })
+                    .size(13.0)
+                    .color(theme::DELETE),
+                );
+            }
             // Hint reflects the user's current bindings (PRD 7.6).
             let kb = &app.state.config.keybindings;
             let disp = |action: &str| {
@@ -548,6 +570,19 @@ fn render_preview(app: &mut KakaApp, ui: &mut egui::Ui) {
     if app.zoom_photo_id != Some(item.id) {
         app.zoom_active = false;
         app.zoom_photo_id = Some(item.id);
+        app.missing_overlay_dismissed = None;
+    }
+
+    // 文件丢失 (PRD 7.9.2 / UI 3.3.1): dark overlay + 移除丢失记录/稍后处理.
+    // The normal texture pipeline is skipped entirely (the file is gone —
+    // generating would spin the thumbnail worker forever).
+    if item.is_missing() && app.missing_overlay_dismissed != Some(item.id) {
+        // 磁盘缓存的预览图仍保留（移除记录只清登记），画出它的"遗像"并压上
+        // 半透明覆盖层。绝不入队生成——源文件已不存在。
+        let (tex, _needs) = app.textures.preview_for(ui.ctx(), &item);
+        draw_missing_overlay(app, ui, rect, &item, &tex);
+        preview_context_menu(app, ui, &resp, &item);
+        return;
     }
 
     let (tex, needs) = app.textures.preview_for(ui.ctx(), &item);
@@ -891,6 +926,84 @@ fn draw_viewport_minimap(
 
 /// Right-click menu for the preview area (PRD 3.3.2): marking, RAW retry,
 /// reveal in Explorer, copy path.
+/// 文件丢失覆盖层 (PRD 7.9.2 / UI 3.3.1): semi-transparent dark cover with a
+/// title, the dead path, and 移除丢失记录 / 稍后处理 buttons.
+fn draw_missing_overlay(
+    app: &mut KakaApp,
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    item: &PhotoListItem,
+    tex: &egui::TextureHandle,
+) {
+    // 遗像：磁盘缓存的预览图按适配绘制，覆盖层压在其上仍可辨认。
+    let ts = tex.size_vec2();
+    if ts.x > 0.0 && ts.y > 0.0 {
+        let avail = rect.shrink(24.0);
+        let scale = (avail.width() / ts.x).min(avail.height() / ts.y).min(1.0);
+        let img_rect = egui::Rect::from_center_size(rect.center(), ts * scale);
+        ui.painter().image(
+            tex.id(),
+            img_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+    ui.painter()
+        .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(130));
+    let c = rect.center();
+    ui.painter().text(
+        egui::pos2(c.x, c.y - 64.0),
+        egui::Align2::CENTER_CENTER,
+        t("文件已丢失", "File missing"),
+        egui::FontId::proportional(24.0),
+        theme::DELETE,
+    );
+    ui.painter().text(
+        egui::pos2(c.x, c.y - 30.0),
+        egui::Align2::CENTER_CENTER,
+        t("数据库中保留着这条记录，但磁盘上的文件已不存在：", "The library keeps this record, but the file on disk no longer exists:"),
+        egui::FontId::proportional(13.0),
+        theme::TEXT_SECONDARY,
+    );
+    ui.painter().text(
+        egui::pos2(c.x, c.y - 10.0),
+        egui::Align2::CENTER_CENTER,
+        &item.current_path,
+        egui::FontId::proportional(12.0),
+        theme::TEXT_WEAK,
+    );
+
+    let bw = 160.0;
+    let bh = 32.0;
+    let y = c.y + 30.0;
+    let remove_rect =
+        egui::Rect::from_center_size(egui::pos2(c.x - bw / 2.0 - 10.0, y), egui::vec2(bw, bh));
+    let later_rect =
+        egui::Rect::from_center_size(egui::pos2(c.x + bw / 2.0 + 10.0, y), egui::vec2(bw, bh));
+
+    let remove_btn = egui::Button::new(
+        RichText::new(t("移除丢失记录", "Remove record"))
+            .size(14.0)
+            .color(egui::Color32::WHITE),
+    )
+    .fill(theme::DELETE)
+    .stroke(egui::Stroke::new(1.0, theme::DELETE));
+    if ui.put(remove_rect, remove_btn).clicked() {
+        let id = item.id;
+        app.remove_missing_record(id);
+        app.toast(
+            ToastKind::Info,
+            t("已移除丢失记录（仅数据库，不动磁盘文件）", "Missing record removed (library only, no files touched)"),
+        );
+    }
+    if ui
+        .put(later_rect, egui::Button::new(RichText::new(t("稍后处理", "Later")).size(14.0)))
+        .clicked()
+    {
+        app.missing_overlay_dismissed = Some(item.id);
+    }
+}
+
 fn preview_context_menu(
     app: &mut KakaApp,
     _ui: &mut egui::Ui,
@@ -898,6 +1011,59 @@ fn preview_context_menu(
     item: &PhotoListItem,
 ) {
     resp.context_menu(|ui| {
+        // 文件丢失条目 (PRD 7.9.2 / UI 3.3.2-12).
+        if item.is_missing()
+            && ui
+                .button(t("从数据库移除此记录", "Remove this record from the library"))
+                .clicked()
+        {
+            let id = item.id;
+            app.remove_missing_record(id);
+            app.toast(
+                ToastKind::Info,
+                t("已移除丢失记录（仅数据库，不动磁盘文件）", "Missing record removed (library only, no files touched)"),
+            );
+        }
+        // 批量移除选区内的丢失记录 (PRD 7.9.2) — needs 二次确认 per setting.
+        let missing_in_sel = app
+            .state
+            .ws
+            .items
+            .iter()
+            .filter(|p| p.is_missing() && app.state.ws.selection.contains(&p.id))
+            .count();
+        if missing_in_sel > 0
+            && ui
+                .button(format!(
+                    "{}（{missing_in_sel}）",
+                    t("移除选区内的丢失记录", "Remove missing records in selection")
+                ))
+                .clicked()
+        {
+            if app.state.config.batch_confirm {
+                app.confirm = Some(ConfirmDialog {
+                    title: t("移除丢失记录", "Remove missing records").into(),
+                    text: match crate::i18n::lang() {
+                        crate::i18n::Lang::Zh => format!(
+                            "将把选区中的 {missing_in_sel} 条丢失记录从数据库移除。
+只删除数据库记录，不会动磁盘上的任何文件。确定？"
+                        ),
+                        crate::i18n::Lang::En => format!(
+                            "{missing_in_sel} missing records in the selection will be removed from the library.
+Only database rows are deleted — no files are touched. Continue?"
+                        ),
+                    },
+                    confirm_label: t("移除", "Remove").into(),
+                    danger: true,
+                    on_confirm: Box::new(|app| app.remove_missing_in_selection()),
+                });
+            } else {
+                app.remove_missing_in_selection();
+            }
+        }
+        if item.is_missing() || missing_in_sel > 0 {
+            ui.separator();
+        }
         if ui.button(t("标记待删（Q）", "Mark for deletion (Q)")).clicked() {
             let _ = app.state.set_status_current(Status::Delete, true);
             app.advance(1);

@@ -56,6 +56,24 @@ impl Workspace {
         self.items.get(self.current_index)
     }
 
+    /// Remove a photo from the workspace list after its DB row was deleted
+    /// (PRD 7.9.2 文件丢失). The current index stays put so the photo that
+    /// comes next is now shown; removing the last shown photo steps back one.
+    pub fn remove_item(&mut self, photo_id: i64) {
+        let Some(idx) = self.items.iter().position(|p| p.id == photo_id) else {
+            return;
+        };
+        self.items.remove(idx);
+        self.selection.remove(&photo_id);
+        if self.items.is_empty() {
+            self.current_index = 0;
+        } else if idx < self.current_index {
+            self.current_index -= 1;
+        } else if self.current_index >= self.items.len() {
+            self.current_index = self.items.len() - 1;
+        }
+    }
+
     pub fn selected_count(&self) -> usize {
         self.selection.len()
     }

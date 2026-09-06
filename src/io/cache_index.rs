@@ -170,6 +170,19 @@ impl CacheIndex {
         self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
+
+    /// Remove the thumb/preview index rows for a photo hash (PRD 7.9.2:
+    /// removing a lost-file record cleans its cache REGISTRATION; the cache
+    /// files themselves are left in place).
+    pub fn delete_hash_registrations(&self, hash: &str) {
+        for rel in [
+            format!("thumbs/{hash}.jpg"),
+            format!("thumbs/{hash}@2x.jpg"),
+            format!("previews/{hash}_preview.jpg"),
+        ] {
+            let _ = self.delete_row(&rel);
+        }
+    }
 }
 
 // ---- Global best-effort handle (used from the UI / worker threads) ----
@@ -188,6 +201,11 @@ fn with_global(f: impl FnOnce(&mut CacheIndex)) {
     if let Some(idx) = guard.as_mut() {
         f(idx);
     }
+}
+
+/// Best-effort global wrapper for [`CacheIndex::delete_hash_registrations`].
+pub fn delete_hash_registrations(hash: &str) {
+    with_global(|idx| idx.delete_hash_registrations(hash));
 }
 
 /// Normalize a path inside the cache root to a forward-slash rel path

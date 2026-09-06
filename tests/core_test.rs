@@ -1179,3 +1179,112 @@ fn import_report_csv_and_structured_repairs() {
     assert_eq!(r.original_filename, "DSC_0001.JPG");
     assert!(!r.repaired_at.is_empty());
 }
+
+#[test]
+fn remove_missing_record_updates_rows_and_cache_registry() {
+    let root = temp_root();
+    let db_path = root.join("missing.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("import");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [10, 20, 30]);
+    make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
+    let items = db::photos::list_items_in_folder(
+        &db,
+        &src.to_string_lossy(),
+        kaka::model::SortOrder::FilenameAsc,
+    )
+    .unwrap();
+    assert_eq!(items.len(), 2);
+    let victim = &items[0];
+    let hash = victim.thumb_hash.clone().unwrap();
+
+    // Generate + register the cache files for the victim's hash.
+    assert!(thumbnails::generate_caches(
+        Path::new(&victim.current_path),
+        &hash,
+        1.0
+    )
+    .unwrap());
+    let global_idx = kaka::io::cache_index::CacheIndex::open_default().unwrap();
+    assert!(
+        global_idx
+            .has(format!("thumbs/{hash}.jpg").as_str())
+            .unwrap(),
+        "registration should exist before cleanup"
+    );
+    drop(global_idx);
+
+    // Delete the library row…
+    db::photos::delete_photo(&db, victim.id).unwrap();
+    let counts = db::photos::status_counts(&db, "").unwrap();
+    assert_eq!(counts.total, 1, "photos row count must drop 2 → 1");
+
+    // …and clean the disk-cache registration (files stay on disk).
+    kaka::io::cache_index::delete_hash_registrations(&hash);
+    let global_idx = kaka::io::cache_index::CacheIndex::open_default().unwrap();
+    assert!(
+        !global_idx
+            .has(format!("thumbs/{hash}.jpg").as_str())
+            .unwrap(),
+        "registration must be cleaned"
+    );
+    assert!(
+        thumbnails::thumb_path(&hash, 1.0).exists(),
+        "the cache FILE itself is kept"
+    );
+    drop(global_idx);
+    kaka::io::cache_index::reset_global();
+}
+
+#[test]
+fn workspace_remove_item_navigation() {
+    use kaka::app::state::Workspace;
+    use kaka::model::{PhotoListItem, Status};
+
+    let item = |id: i64| PhotoListItem {
+        id,
+        original_filename: format!("DSC_{id:04}.JPG"),
+        current_path: format!("x/DSC_{id:04}.JPG"),
+        folder_path: "x".into(),
+        status: Status::Untreated,
+        capture_time: String::new(),
+        file_size: 1,
+        thumb_hash: None,
+        camera_model: None,
+        lens_model: None,
+        iso: None,
+        aperture: None,
+        shutter_speed: None,
+        focal_length: None,
+        decode_failed: false,
+        preview_only: false,
+        pair_group_id: None,
+        rotation_override: 0,
+    };
+
+    let mut ws = Workspace::empty();
+    ws.items = vec![item(1), item(2), item(3)];
+    ws.current_index = 1; // showing item 2
+
+    // Removing the current shows the NEXT photo at the same index.
+    ws.remove_item(2);
+    assert_eq!(ws.items.len(), 2);
+    assert_eq!(ws.items[ws.current_index].id, 3, "next photo should show");
+    assert!(!ws.selection.contains(&2));
+
+    // Removing the last shown photo steps back one.
+    ws.remove_item(3);
+    assert_eq!(ws.items.len(), 1);
+    assert_eq!(ws.items[ws.current_index].id, 1);
+
+    // Removing everything empties the workspace safely.
+    ws.remove_item(1);
+    assert!(ws.items.is_empty());
+    assert_eq!(ws.current_index, 0);
+}

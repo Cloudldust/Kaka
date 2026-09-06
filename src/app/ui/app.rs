@@ -123,6 +123,9 @@ pub struct KakaApp {
     pub import_scan_dbg_sig: (usize, i32, i32, i32, i32),
     /// Expanded detail list of the import completion report (PRD 6.8).
     pub import_report_view: Option<ImportReportView>,
+    /// 稍后处理 (UI 3.3.1): hide the missing-file overlay for this photo until
+    /// another photo is selected.
+    pub missing_overlay_dismissed: Option<i64>,
 
     // Zoom (Z-key) view state (PRD 7.4). The pan anchor is stored as the image
     // point (fractions 0..1) shown at the viewport center, so it survives the
@@ -339,6 +342,7 @@ impl KakaApp {
             import_scan_scroll_offset: 0.0,
             import_scan_dbg_sig: (0, 0, 0, 0, 0),
             import_report_view: None,
+            missing_overlay_dismissed: None,
             zoom_active: false,
             zoom_center: (0.5, 0.5),
             zoom_scale_target: 1.0,
@@ -1113,6 +1117,49 @@ impl KakaApp {
             }
             self.needs_save = true;
         }
+    }
+
+    // ---- 文件丢失记录移除 (PRD 7.9.2 / UI 3.3.1) ----
+
+    /// Remove a lost photo's LIBRARY RECORD (PRD 7.9.2): deletes the DB row
+    /// and cleans the memory textures + disk-cache registration. Never
+    /// touches files on disk.
+    pub fn remove_missing_record(&mut self, photo_id: i64) {
+        let Some(item) = self.state.ws.items.iter().find(|p| p.id == photo_id).cloned() else {
+            return;
+        };
+        let _ = db::photos::delete_photo(&self.state.db, photo_id);
+        if let Some(hash) = &item.thumb_hash {
+            crate::io::cache_index::delete_hash_registrations(hash);
+            self.textures.invalidate(photo_id, hash);
+        }
+        self.state.ws.remove_item(photo_id);
+        let _ = self.state.refresh_counts();
+        self.needs_save = true;
+    }
+
+    /// Remove every MISSING photo in the current selection (PRD 7.9.2).
+    pub fn remove_missing_in_selection(&mut self) {
+        let ids: Vec<i64> = self
+            .state
+            .ws
+            .items
+            .iter()
+            .filter(|p| p.is_missing() && self.state.ws.selection.contains(&p.id))
+            .map(|p| p.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len();
+        for id in ids {
+            self.remove_missing_record(id);
+        }
+        let msg = match i18n::lang() {
+            i18n::Lang::Zh => format!("已移除 {n} 条丢失记录（仅数据库，不动磁盘文件）"),
+            i18n::Lang::En => format!("Removed {n} missing records (library only, no files touched)"),
+        };
+        self.toast(ToastKind::Success, msg);
     }
 
     // ---- Import pre-scan (PRD 6.5 第三步 去重扫描) ----
