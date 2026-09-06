@@ -254,6 +254,51 @@ impl Filter {
     }
 }
 
+/// Histogram channel display mode (PRD 7.5-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HistogramMode {
+    /// R/G/B overlaid (default).
+    #[default]
+    Rgb,
+    R,
+    G,
+    B,
+    Luma,
+}
+
+impl HistogramMode {
+    pub fn code(&self) -> &'static str {
+        match self {
+            HistogramMode::Rgb => "rgb",
+            HistogramMode::R => "r",
+            HistogramMode::G => "g",
+            HistogramMode::B => "b",
+            HistogramMode::Luma => "l",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Self {
+        match s {
+            "r" => HistogramMode::R,
+            "g" => HistogramMode::G,
+            "b" => HistogramMode::B,
+            "l" => HistogramMode::Luma,
+            _ => HistogramMode::Rgb,
+        }
+    }
+
+    /// Menu / tooltip label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            HistogramMode::Rgb => "RGB 叠加",
+            HistogramMode::R => "仅R",
+            HistogramMode::G => "仅G",
+            HistogramMode::B => "仅B",
+            HistogramMode::Luma => "仅L",
+        }
+    }
+}
+
 /// Settings persisted to %APPDATA%/Kaka/config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -277,6 +322,8 @@ pub struct AppConfig {
     pub lr_install_path: String,
     /// UI language code: "zh" (default) or "en".
     pub language: String,
+    /// Histogram channel mode (PRD 7.5-1).
+    pub histogram_mode: HistogramMode,
     /// Custom keybinding overrides: action code → key code (e.g.
     /// "mark_delete" → "Q"). Missing entries use the built-in defaults
     /// (app::keybinds); reserved keys can never be bound.
@@ -298,6 +345,7 @@ impl Default for AppConfig {
             show_clipping_warning: true,
             dim_reviewed_thumbnails: true,
             batch_confirm: true,
+            histogram_mode: HistogramMode::Rgb,
             wrap_at_end: false,
             default_target_dir: String::new(),
             cache_dir: cache_default,

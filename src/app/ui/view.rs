@@ -1197,8 +1197,25 @@ fn draw_right_panel(app: &mut KakaApp, ui: &mut egui::Ui) {
 
 /// Draw the current photo's histogram in the right panel (PRD 7.5).
 fn draw_histogram(app: &mut KakaApp, ui: &mut egui::Ui, photo_id: i64, hash: &str) {
-    ui.label(RichText::new(t("直方图", "Histogram")).size(12.0).color(theme::TEXT_SECONDARY).strong());
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 110.0), egui::Sense::hover());
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(t("直方图", "Histogram"))
+                .size(12.0)
+                .color(theme::TEXT_SECONDARY)
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // ▾ 通道模式菜单 (PRD 7.5-1)；直方图右键打开同款。
+            ui.menu_button("▼", |ui| histogram_mode_menu(app, ui))
+                .response
+                .on_hover_text(t("直方图通道模式", "Histogram channel mode"));
+        });
+    });
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 110.0),
+        egui::Sense::click_and_drag(),
+    );
+    resp.context_menu(|ui| histogram_mode_menu(app, ui));
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, theme::PREVIEW_BG);
     painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
@@ -1226,7 +1243,31 @@ fn draw_histogram(app: &mut KakaApp, ui: &mut egui::Ui, photo_id: i64, hash: &st
     let Some(h) = app.state.histogram_for(photo_id) else {
         return;
     };
-    plot_histogram(&painter, rect, h, app.state.config.show_clipping_warning);
+    plot_histogram(
+        &painter,
+        rect,
+        h,
+        app.state.config.show_clipping_warning,
+        app.state.config.histogram_mode,
+    );
+}
+
+/// 通道模式菜单体 (PRD 7.5-1)：▾ 按钮与直方图右键共用，当前项打勾。
+fn histogram_mode_menu(app: &mut KakaApp, ui: &mut egui::Ui) {
+    use crate::model::HistogramMode;
+    let current = app.state.config.histogram_mode;
+    for (mode, label) in [
+        (HistogramMode::Rgb, t("RGB 叠加", "RGB overlay")),
+        (HistogramMode::R, t("仅R", "R only")),
+        (HistogramMode::G, t("仅G", "G only")),
+        (HistogramMode::B, t("仅B", "B only")),
+        (HistogramMode::Luma, t("仅L", "Luma only")),
+    ] {
+        if ui.radio(current == mode, label).clicked() {
+            app.state.config.histogram_mode = mode;
+            let _ = crate::config::save(&app.state.config);
+        }
+    }
 }
 
 /// Overlay 4 polyline curves (R/G/B/L), plus overflow markers at the edges.
@@ -1235,15 +1276,23 @@ fn plot_histogram(
     rect: egui::Rect,
     h: &crate::io::histogram::Histogram,
     show_clipping: bool,
+    mode: crate::model::HistogramMode,
 ) {
+    use crate::model::HistogramMode;
     let w = rect.width();
     let height = rect.height();
-    let channels: [([u32; 256], egui::Color32); 4] = [
-        (h.r, egui::Color32::from_rgb(0xff, 0x55, 0x55)),
-        (h.g, egui::Color32::from_rgb(0x55, 0xe8, 0x55)),
-        (h.b, egui::Color32::from_rgb(0x55, 0x90, 0xff)),
-        (h.l, egui::Color32::from_rgb(0xe0, 0xe0, 0xe0)),
-    ];
+    // 按模式只画对应曲线 (PRD 7.5-1)。
+    let channels: Vec<(&[u32; 256], egui::Color32)> = match mode {
+        HistogramMode::Rgb => vec![
+            (&h.r, egui::Color32::from_rgb(0xff, 0x55, 0x55)),
+            (&h.g, egui::Color32::from_rgb(0x55, 0xe8, 0x55)),
+            (&h.b, egui::Color32::from_rgb(0x55, 0x90, 0xff)),
+        ],
+        HistogramMode::R => vec![(&h.r, egui::Color32::from_rgb(0xff, 0x55, 0x55))],
+        HistogramMode::G => vec![(&h.g, egui::Color32::from_rgb(0x55, 0xe8, 0x55))],
+        HistogramMode::B => vec![(&h.b, egui::Color32::from_rgb(0x55, 0x90, 0xff))],
+        HistogramMode::Luma => vec![(&h.l, egui::Color32::from_rgb(0xe0, 0xe0, 0xe0))],
+    };
     for (arr, color) in channels {
         let maxv = arr.iter().copied().max().unwrap_or(1).max(1) as f32;
         let mut pts: Vec<egui::Pos2> = Vec::with_capacity(256);
