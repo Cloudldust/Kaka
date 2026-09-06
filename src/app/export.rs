@@ -218,10 +218,13 @@ pub fn export_file_list(
 }
 
 /// 12.3: write/modify an XMP sidecar for each kept photo marking it "Kaka:Keep"
-/// with the given rating and (optionally) rotation. This is a first-cut that
-/// replaces the sidecar with a minimal standard XMP; it does not yet merge with
-/// existing XMP fields.
+/// with the given rating and (optionally) rotation. Lightroom Classic ignores
+/// sidecars for non-RAW formats (it only reads sidecars for proprietary RAW),
+/// so for JPEG/PNG the same packet is additionally embedded into the file
+/// itself. This is a first-cut that replaces the sidecar with a minimal
+/// standard XMP; it does not yet merge with existing XMP fields.
 pub fn write_xmp_sidecars(db: &Db, folder: &str, rating: u8) -> anyhow::Result<usize> {
+    use crate::io::format::{classify, Classification, FormatKind};
     let items = db::photos::list_items_in_folder(db, folder, SortOrder::CaptureTimeAsc)?;
     let kept: Vec<PhotoListItem> = items
         .into_iter()
@@ -230,8 +233,21 @@ pub fn write_xmp_sidecars(db: &Db, folder: &str, rating: u8) -> anyhow::Result<u
     let mut n = 0usize;
     for p in &kept {
         if let Ok(Some(full)) = db::photos::get_photo(db, p.id) {
-            let dest = PathBuf::from(&p.current_path).with_extension("xmp");
-            if write_xmp_to(&dest, "Kaka:Keep", rating, full.rotation_override as i64).is_ok() {
+            let src = PathBuf::from(&p.current_path);
+            let orientation = full.rotation_override as i64;
+            let dest = src.with_extension("xmp");
+            let mut ok = write_xmp_to(&dest, "Kaka:Keep", rating, orientation).is_ok();
+            if matches!(
+                classify(&src),
+                Classification::Photo(FormatKind::Jpeg) | Classification::Photo(FormatKind::Png)
+            ) {
+                let xml = crate::io::xmp::rating_xml("Kaka:Keep", rating, orientation);
+                // Embed failure (e.g. corrupt file) keeps the sidecar result.
+                if crate::io::xmp::embed_into_file(&src, &xml).is_ok() {
+                    ok = true;
+                }
+            }
+            if ok {
                 n += 1;
             }
         }
@@ -250,37 +266,13 @@ fn sidecar_for(path: &Path) -> Option<PathBuf> {
 }
 
 /// Write a minimal sidecar XMP to `dest` with the given label, rating and
-/// orientation. Creates the parent dir if needed.
+/// orientation. Creates the parent dir if needed. The packet template lives in
+/// `io::xmp::rating_xml` (shared with the in-file embedding path).
 fn write_xmp_to(dest: &Path, label: &str, rating: u8, orientation: i64) -> anyhow::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let orient = if orientation != 0 {
-        format!("\n   <tiff:Orientation>{orientation}</tiff:Orientation>")
-    } else {
-        String::new()
-    };
-    let xml = format!(
-        r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about=""
-     xmlns:dc="http://purl.org/dc/elements/1.1/"
-     xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-     xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
-     xmlns:tiff="http://ns.adobe.com/tiff/1.0/">
-   <dc:subject><rdf:Bag><rdf:li>{label}</rdf:li></rdf:Bag></dc:subject>
-   <xmp:Label>{label}</xmp:Label>
-   <crs:Rating>{rating}</crs:Rating>{orient}
-  </rdf:Description>
- </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end="w"?>"#,
-        label = label,
-        rating = rating,
-        orient = orient,
-    );
-    std::fs::write(dest, xml)?;
+    std::fs::write(dest, crate::io::xmp::rating_xml(label, rating, orientation))?;
     Ok(())
 }
 
@@ -364,4 +356,32 @@ pub fn send_to_lightroom(db: &Db, folder: &str, lr_exe: &Path) -> anyhow::Result
     }
     cmd.spawn()?;
     Ok(kept.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xmp_rating_uses_xmp_namespace() {
+        // Lightroom 只认 xmp:Rating；crs: (camera-raw-settings) 没有 Rating
+        // 属性，会被 LR 整体忽略。
+        let dest = std::env::temp_dir().join(format!("kaka_xmp_test_{}.xmp", std::process::id()));
+        write_xmp_to(&dest, "Kaka:Keep", 4, 90).unwrap();
+        let xml = std::fs::read_to_string(&dest).unwrap();
+        assert!(xml.contains("<xmp:Rating>4</xmp:Rating>"), "missing xmp:Rating:\n{xml}");
+        assert!(!xml.contains("crs:Rating"));
+        assert!(xml.contains("<tiff:Orientation>90</tiff:Orientation>"));
+        std::fs::remove_file(&dest).ok();
+    }
+
+    #[test]
+    fn xmp_orientation_omitted_when_zero() {
+        let dest = std::env::temp_dir().join(format!("kaka_xmp_test0_{}.xmp", std::process::id()));
+        write_xmp_to(&dest, "Kaka:Keep", 0, 0).unwrap();
+        let xml = std::fs::read_to_string(&dest).unwrap();
+        assert!(xml.contains("<xmp:Rating>0</xmp:Rating>"));
+        assert!(!xml.contains("tiff:Orientation"));
+        std::fs::remove_file(&dest).ok();
+    }
 }

@@ -1085,7 +1085,10 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
 
             ui.add_space(8.0);
             ui.separator();
-            ui.label(RichText::new(t("方式三：写入 XMP 侧车标记（Kaka:Keep + 星级）", "3. Write XMP sidecar marks (Kaka:Keep + rating)")).size(14.0).color(theme::ACCENT).strong());
+            ui.label(RichText::new(t(
+                "方式三：写入 XMP 标记（Kaka:Keep + 星级；RAW 写侧车，JPEG/PNG 额外内嵌进文件——LR 不读非 RAW 的侧车）",
+                "3. Write XMP marks (Kaka:Keep + rating; RAW=sidecar, JPEG/PNG also embedded — LR ignores non-RAW sidecars)",
+            )).size(14.0).color(theme::ACCENT).strong());
             if ui.button(t("写入 XMP 标记", "Write XMP marks")).clicked() {
                 xmp_clicked = true;
             }

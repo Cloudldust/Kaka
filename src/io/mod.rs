@@ -9,3 +9,4 @@ pub mod histogram;
 pub mod recycle;
 pub mod scanner;
 pub mod thumbnails;
+pub mod xmp;
