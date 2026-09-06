@@ -83,11 +83,23 @@ pub fn generate_preview(
         } else {
             rgb
         };
-    let file = std::fs::File::create(dest)?;
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
-    enc.encode_image(&small)?;
+    encode_jpeg_atomic(dest, &small, quality)?;
     crate::io::cache_index::register_cache_file(dest);
     Ok(true)
+}
+
+/// Encode `small` as JPEG into `dest` atomically (temp file + rename). The UI
+/// thread reads these cache files at any moment; a direct write would let it
+/// see a half-written JPEG that fails to decode, which made grid cells flicker
+/// between placeholder and texture and re-queue the generation in a loop.
+fn encode_jpeg_atomic(dest: &Path, small: &image::RgbImage, quality: u8) -> anyhow::Result<()> {
+    let tmp = dest.with_extension("kakatmp");
+    let file = std::fs::File::create(&tmp)?;
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
+    enc.encode_image(small)?;
+    drop(enc);
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
 }
 
 /// True if a cached thumb file already exists on disk for this hash.
@@ -237,9 +249,7 @@ pub fn generate_thumbnail(
         rgb
     };
     // Use the `image` crate's JPEG encoder via its save_with_format.
-    let file = std::fs::File::create(dest)?;
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
-    enc.encode_image(&thumb)?;
+    encode_jpeg_atomic(dest, &thumb, quality)?;
     crate::io::cache_index::register_cache_file(dest);
     Ok(true)
 }
@@ -300,9 +310,7 @@ pub fn generate_caches(src: &Path, hash: &str, dpi_scale: f32) -> anyhow::Result
         if let Some(dir) = thumb_dest.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let file = std::fs::File::create(&thumb_dest)?;
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, THUMB_QUALITY);
-        enc.encode_image(&thumb)?;
+        encode_jpeg_atomic(&thumb_dest, &thumb, THUMB_QUALITY)?;
         crate::io::cache_index::register_cache_file(&thumb_dest);
         wrote = true;
     }
@@ -321,9 +329,7 @@ pub fn generate_caches(src: &Path, hash: &str, dpi_scale: f32) -> anyhow::Result
         if let Some(dir) = prev_dest.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let file = std::fs::File::create(&prev_dest)?;
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(file, PREVIEW_QUALITY);
-        enc.encode_image(&small)?;
+        encode_jpeg_atomic(&prev_dest, &small, PREVIEW_QUALITY)?;
         crate::io::cache_index::register_cache_file(&prev_dest);
         wrote = true;
     }

@@ -115,6 +115,12 @@ pub struct KakaApp {
     pub import_scan_filter: ImportScanFilter,
     /// 0 = S, 1 = M, 2 = L (see IMPORT_SCAN_CELL_SIZES).
     pub import_scan_cell: usize,
+    /// Grid scroll offset bookkeeping: keep the view position across S/M/L
+    /// cell-size switches (content height changes drastically).
+    pub import_scan_last_cell: usize,
+    pub import_scan_scroll_offset: f32,
+    /// DEBUG: last logged grid layout signature (jitter diagnosis).
+    pub import_scan_dbg_sig: (usize, i32, i32, i32, i32),
 
     // Zoom (Z-key) view state (PRD 7.4). The pan anchor is stored as the image
     // point (fractions 0..1) shown at the viewport center, so it survives the
@@ -317,6 +323,9 @@ impl KakaApp {
             import_scan_sort: ImportScanSort::CaptureTime,
             import_scan_filter: ImportScanFilter::All,
             import_scan_cell: 1,
+            import_scan_last_cell: 1,
+            import_scan_scroll_offset: 0.0,
+            import_scan_dbg_sig: (0, 0, 0, 0, 0),
             zoom_active: false,
             zoom_center: (0.5, 0.5),
             zoom_scale_target: 1.0,
@@ -1402,7 +1411,10 @@ impl KakaApp {
     /// Drain background thumbnail-completion events and invalidate texture
     /// cache entries so the fresh thumbnail/preview is loaded next frame.
     pub fn drain_thumbs(&mut self) {
-        for (photo_id, hash) in self.thumbs.poll() {
+        // At most 2 per frame: each invalidation triggers a synchronous
+        // texture reload; spreading them keeps the UI hitch-free while
+        // batches of thumbnails finish (e.g. the import grid prewarm).
+        for (photo_id, hash) in self.thumbs.poll_limited(2) {
             self.textures.invalidate(photo_id, &hash);
         }
     }

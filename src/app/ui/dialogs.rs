@@ -130,12 +130,18 @@ fn dim_backdrop(ctx: &egui::Context) {
 
 fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     dim_backdrop(ctx);
+    // 位置只计算一次（存入窗口状态），之后不再重算：anchor + 逐帧居中会让
+    // egui 的两轮布局互相追逐，窗口整体左右 ±44px 振荡（抖动）。
+    let px = ((ctx.input(|i| i.viewport_rect().width()) - 1160.0) / 2.0).max(8.0);
+    let py = 40.0;
     egui::Window::new(t("导入照片", "Import Photos"))
         .collapsible(false)
-        .resizable(true)
-        .default_size([920.0, 680.0])
-        .min_size([720.0, 540.0])
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        // 固定尺寸（不可 auto-size）：列数从 available_width 推导，可伸缩
+        // 窗口会形成 窗口→列数→网格宽→窗口 的反馈回路（拖视图滑条时抖动、
+        // 窗口被撑大）。1160 宽让 S 档正好 10 列、M 档 7 列、L 档 6 列。
+        .resizable(false)
+        .fixed_size([1160.0, 700.0])
+        .default_pos(egui::pos2(px, py))
         .frame(dialog_frame())
         .show(ctx, |ui| {
             // Mode tabs (window title already says 导入 — no extra heading).
@@ -1510,7 +1516,7 @@ fn import_scan_area(app: &mut KakaApp, ui: &mut egui::Ui, ctx: &egui::Context) {
 
     // 文件网格：宽度自适应每行 4-10 张。
     let cell = crate::app::ui::app::IMPORT_SCAN_CELL_SIZES[app.import_scan_cell];
-    let cols = ((ui.available_width() / (cell + 8.0)).floor() as usize).clamp(4, 10);
+    let cols = (((ui.available_width() - 14.0) / (cell + 8.0)).floor() as usize).clamp(4, 10);
     let mut order: Vec<usize> = (0..app.import_scan_files.len()).collect();
     match app.import_scan_sort {
         ImportScanSort::CaptureTime => order.sort_by(|&a, &b| {
@@ -1533,21 +1539,47 @@ fn import_scan_area(app: &mut KakaApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     });
     // 为底部主按钮行预留空间（egui 坑：占满 available 会把按钮挤出窗口）。
     let grid_h = (ui.available_height() - 70.0).max(140.0);
-    egui::ScrollArea::vertical()
+    // DEBUG（抖动诊断）：布局签名变化时记日志，静止时若仍刷屏即为逐帧振荡。
+    let dbg_mr = ui.max_rect();
+    let dbg_sig = (
+        cols,
+        (grid_h * 2.0).round() as i32,
+        (dbg_mr.width() * 2.0).round() as i32,
+        (dbg_mr.height() * 2.0).round() as i32,
+        (ui.available_width() * 2.0).round() as i32,
+    );
+    if dbg_sig != app.import_scan_dbg_sig {
+        let (t, sr) = ctx.input(|i| (i.time, i.viewport_rect()));
+        log::info!(
+            "import grid layout: t={t:.4} cols={cols} grid_h={grid_h:.1} max_rect={dbg_mr:?} avail_w={:.1} screen={sr:?}",
+            ui.available_width()
+        );
+        app.import_scan_dbg_sig = dbg_sig;
+    }
+    // S/M/L 切换时保持滚动位置比例（内容高度骤变会让视图大幅跳变）。
+    let cell_changed = app.import_scan_last_cell != app.import_scan_cell;
+    let mut scroll = egui::ScrollArea::vertical()
         .max_height(grid_h)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            egui::Grid::new("import_scan_grid")
-                .spacing([6.0, 6.0])
-                .show(ui, |ui| {
-                    for chunk in order.chunks(cols) {
-                        for &i in chunk {
-                            import_scan_cell(app, ui, i, cell, copy_mode);
-                        }
-                        ui.end_row();
+        .auto_shrink([false, false]);
+    if cell_changed {
+        let ratio = (cell + 6.0)
+            / (crate::app::ui::app::IMPORT_SCAN_CELL_SIZES[app.import_scan_last_cell] + 6.0);
+        scroll = scroll.vertical_scroll_offset(app.import_scan_scroll_offset * ratio);
+        app.import_scan_last_cell = app.import_scan_cell;
+    }
+    let out = scroll.show(ui, |ui| {
+        egui::Grid::new("import_scan_grid")
+            .spacing([6.0, 6.0])
+            .show(ui, |ui| {
+                for chunk in order.chunks(cols) {
+                    for &i in chunk {
+                        import_scan_cell(app, ui, i, cell, copy_mode);
                     }
-                });
-        });
+                    ui.end_row();
+                }
+            });
+    });
+    app.import_scan_scroll_offset = out.state.offset.y;
 }
 
 /// One cell of the import pre-scan grid: 140x140-style frame + thumbnail
@@ -1598,7 +1630,9 @@ fn import_scan_cell(
     };
     let (tex, needs) = app.textures.texture_for(ui.ctx(), &fake);
     if needs {
-        app.thumbs.enqueue(fake.id, &item.thumb_hash, &item.path);
+        // 仅生成 256px 缩略图（97 张 × 1920px 预览的 Lanczos 风暴会让
+        // worker 满载、画面抖动）；预览图在真正查看时按需生成。
+        app.thumbs.enqueue_thumb_only(fake.id, &item.thumb_hash, &item.path);
         egui::Spinner::new().size(22.0).paint_at(
             ui,
             egui::Rect::from_center_size(rect.center(), egui::vec2(26.0, 26.0)),

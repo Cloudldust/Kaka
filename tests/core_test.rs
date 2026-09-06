@@ -315,7 +315,7 @@ fn async_thumb_worker_enqueue_and_finish() {
     let mut finished = false;
     let mut drained: Vec<(i64, String)> = Vec::new();
     for _ in 0..300 {
-        for ev in worker.poll() {
+        for ev in worker.poll_limited(100) {
             if ev.0 == 99 && ev.1 == hash {
                 finished = true;
             }

@@ -20,6 +20,10 @@ struct Job {
     photo_id: i64,
     hash: String,
     path: String,
+    /// Generate the 1920px preview too? Import-grid prewarm uses `false`
+    /// (thumbnail only — 97 full Lanczos downscales to 1920px would hog the
+    /// workers and hitch the UI); the preview is generated lazily on view.
+    preview: bool,
 }
 
 /// Completion notification back to the UI.
@@ -39,6 +43,10 @@ pub struct ThumbWorker {
     queue: JobQueue,
     rx: Receiver<ThumbEvent>,
     pending: HashSet<(i64, String)>,
+    /// Finished-but-not-yet-delivered events, spread over frames by
+    /// [`poll_limited`] so several workers finishing at once don't burst
+    /// synchronous texture reloads into a single UI frame.
+    buffer: Vec<(i64, String)>,
     threads: Vec<JoinHandle<()>>,
     cancel: Arc<AtomicBool>,
 }
@@ -69,6 +77,7 @@ impl ThumbWorker {
             queue,
             rx: ev_rx,
             pending: HashSet::new(),
+            buffer: Vec::new(),
             threads,
             cancel,
         }
@@ -88,9 +97,19 @@ impl ThumbWorker {
                 // Drop the lock while generating so other workers can also run.
                 drop(guard);
                 let src = Path::new(&job.path);
-                // Best-effort generate both caches (single decode; raw files may
-                // fall back to a slow full decode internally).
-                let _ = thumbnails::generate_caches(src, &job.hash, 1.0);
+                if job.preview {
+                    // Best-effort generate both caches (single decode; raw files
+                    // may fall back to a slow full decode internally).
+                    let _ = thumbnails::generate_caches(src, &job.hash, 1.0);
+                } else {
+                    // Thumbnail only (import-grid prewarm).
+                    let _ = thumbnails::generate_thumbnail(
+                        src,
+                        &thumbnails::thumb_path(&job.hash, 1.0),
+                        thumbnails::THUMB_SHORT_EDGE,
+                        thumbnails::THUMB_QUALITY,
+                    );
+                }
                 let _ = ev_tx.send(ThumbEvent::Done {
                     photo_id: job.photo_id,
                     hash: job.hash,
@@ -111,6 +130,16 @@ impl ThumbWorker {
 
     /// Enqueue a photo for generation if it isn't already pending or generated.
     pub fn enqueue(&mut self, photo_id: i64, hash: &str, path: &str) {
+        self.enqueue_inner(photo_id, hash, path, true);
+    }
+
+    /// Like [`enqueue`], but generates only the 256px thumbnail (no 1920px
+    /// preview) — used by the import pre-scan grid prewarm.
+    pub fn enqueue_thumb_only(&mut self, photo_id: i64, hash: &str, path: &str) {
+        self.enqueue_inner(photo_id, hash, path, false);
+    }
+
+    fn enqueue_inner(&mut self, photo_id: i64, hash: &str, path: &str, preview: bool) {
         if hash.is_empty() {
             return;
         }
@@ -125,21 +154,26 @@ impl ThumbWorker {
                 photo_id,
                 hash: hash.to_string(),
                 path: path.to_string(),
+                preview,
             });
             drop(q);
         }
         cv.notify_one();
     }
 
-    /// Non-blocking drain of completion events. Returns list of (photo_id, hash).
-    pub fn poll(&mut self) -> Vec<(i64, String)> {
-        let mut out = Vec::new();
+    /// Non-blocking drain of completion events, at most `max` per call; the
+    /// rest stay buffered for subsequent frames. Every delivered event makes
+    /// the UI invalidate + synchronously reload a texture from disk, so
+    /// bursting several into one frame hitches the render (visible as jitter
+    /// while anything continuously repaints, e.g. during a slider drag).
+    pub fn poll_limited(&mut self, max: usize) -> Vec<(i64, String)> {
         while let Ok(ev) = self.rx.try_recv() {
             let ThumbEvent::Done { photo_id, hash } = ev;
             self.pending.remove(&(photo_id, hash.clone()));
-            out.push((photo_id, hash));
+            self.buffer.push((photo_id, hash));
         }
-        out
+        let n = self.buffer.len().min(max);
+        self.buffer.drain(..n).collect()
     }
 
     /// True if a job for (photo_id, hash) is in flight.
