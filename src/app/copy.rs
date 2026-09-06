@@ -106,6 +106,11 @@ pub type ProgressFn<'a> = &'a mut dyn FnMut(&str, usize, usize, &str) -> bool;
 /// user setting, per PRD 6.7.1. `resume_base` is the number of files already
 /// finished in a previous, interrupted run, so progress continues from that
 /// point instead of restarting at 0 (0 for a fresh import).
+///
+/// `only` restricts the import to the given source paths (PRD 6.5 文件网格:
+/// the user picked a subset in the pre-scan grid). A picked subset also means
+/// explicit user intent, so the dedup skip is bypassed for those files
+/// (强制导入, PRD 6.5).
 pub fn copy_mode_import(
     db: &mut Db,
     source: &Path,
@@ -113,6 +118,7 @@ pub fn copy_mode_import(
     resume: bool,
     resume_base: usize,
     progress: ProgressFn,
+    only: Option<&[String]>,
 ) -> anyhow::Result<CopyOutcome> {
     if !source.exists() || !source.is_dir() {
         anyhow::bail!(
@@ -126,7 +132,14 @@ pub fn copy_mode_import(
     }
     std::fs::create_dir_all(&options.target_dir)?;
 
-    let items = scanner::scan_folder(source, ScanOptions { recursive: options.recursive })?;
+    let scanned_items = scanner::scan_folder(source, ScanOptions { recursive: options.recursive })?;
+    let items = match only {
+        Some(list) => scanned_items
+            .into_iter()
+            .filter(|i| list.contains(&i.path.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>(),
+        None => scanned_items,
+    };
     let total = items.len();
     let mut outcome = CopyOutcome {
         target_dir: options.target_dir.clone(),
@@ -161,7 +174,9 @@ pub fn copy_mode_import(
             item.file_size,
             &capture_time,
         )?;
-        if dedup && existing.is_some() {
+        // A picked subset is explicit user intent (强制导入): bypass the dedup
+        // skip for grid-selected files.
+        if dedup && existing.is_some() && only.is_none() {
             outcome.skipped_existing += 1;
             continue;
         }

@@ -97,6 +97,25 @@ pub struct KakaApp {
     /// removable card to the recycle bin after a fully-successful import.
     pub import_clear_card: bool,
 
+    // Import pre-scan (PRD 6.5 第三步 去重扫描 / UI 5.1-4 文件网格).
+    /// Scan results + per-path checkbox state survive rescans of the same set.
+    pub import_scan_files: Vec<crate::app::import::PrescanItem>,
+    pub import_scan_selected: std::collections::HashSet<String>,
+    pub import_scan_running: bool,
+    pub import_scan_rx: Option<Receiver<anyhow::Result<Option<Vec<crate::app::import::PrescanItem>>>>>,
+    pub import_scan_cancel: Arc<AtomicBool>,
+    pub import_scan_done: Arc<AtomicUsize>,
+    pub import_scan_total: Arc<AtomicUsize>,
+    /// (path, recursive) the current/last scan was started for; a change
+    /// re-triggers the scan (debounced for typed path edits).
+    pub import_scan_key: Option<(String, bool)>,
+    pub import_scan_dirty_since: Option<f64>,
+    /// Grid toolbar state (UI 5.1-4).
+    pub import_scan_sort: ImportScanSort,
+    pub import_scan_filter: ImportScanFilter,
+    /// 0 = S, 1 = M, 2 = L (see IMPORT_SCAN_CELL_SIZES).
+    pub import_scan_cell: usize,
+
     // Zoom (Z-key) view state (PRD 7.4). The pan anchor is stored as the image
     // point (fractions 0..1) shown at the viewport center, so it survives the
     // preview -> RAW texture swap unchanged (无缝替换).
@@ -194,7 +213,52 @@ pub struct KakaApp {
     /// Live progress for the settings button label 重建中 (x/N).
     pub cache_rebuild_done: Arc<AtomicUsize>,
     pub cache_rebuild_total: Arc<AtomicUsize>,
+
+    /// Copy export (PRD 12.1) running on a background thread so the UI never
+    /// freezes; progress is shared via atomics + a mutex'd current filename.
+    pub export_copy_running: bool,
+    pub export_copy_rx: Option<Receiver<anyhow::Result<crate::app::export::ExportOutcome>>>,
+    pub export_copy_cancel: Arc<AtomicBool>,
+    pub export_copy_progress: Arc<ExportCopyProgress>,
+    /// Finished copy outcome for display inside the export dialog.
+    pub export_copy_result: Option<Result<ExportCopyReport, String>>,
 }
+
+/// Shared copy-export progress (PRD 12.1), written by the worker thread and
+/// read by the export dialog every frame.
+#[derive(Default)]
+pub struct ExportCopyProgress {
+    pub current: std::sync::Mutex<String>,
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+}
+
+/// Outcome of a finished copy export, shown in the export dialog.
+pub struct ExportCopyReport {
+    pub copied: usize,
+    pub failed: usize,
+    pub cancelled: bool,
+    pub failures: Vec<String>,
+}
+
+/// Sort key of the import pre-scan grid (UI 5.1-4 工具栏).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportScanSort {
+    CaptureTime,
+    Filename,
+    Size,
+}
+
+/// Filter of the import pre-scan grid (UI 5.1-4 工具栏).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportScanFilter {
+    All,
+    ToImport,
+    Exists,
+}
+
+/// Cell size presets of the import pre-scan grid: S / M / L.
+pub const IMPORT_SCAN_CELL_SIZES: [f32; 3] = [100.0, 140.0, 180.0];
 
 pub struct ConfirmDialog {
     pub title: String,
@@ -241,6 +305,18 @@ impl KakaApp {
             export_org: crate::app::copy::OrgMode::Structure,
             lr_path: None,
             import_clear_card: false,
+            import_scan_files: Vec::new(),
+            import_scan_selected: std::collections::HashSet::new(),
+            import_scan_running: false,
+            import_scan_rx: None,
+            import_scan_cancel: Arc::new(AtomicBool::new(false)),
+            import_scan_done: Arc::new(AtomicUsize::new(0)),
+            import_scan_total: Arc::new(AtomicUsize::new(0)),
+            import_scan_key: None,
+            import_scan_dirty_since: None,
+            import_scan_sort: ImportScanSort::CaptureTime,
+            import_scan_filter: ImportScanFilter::All,
+            import_scan_cell: 1,
             zoom_active: false,
             zoom_center: (0.5, 0.5),
             zoom_scale_target: 1.0,
@@ -285,6 +361,11 @@ impl KakaApp {
             cache_rebuild_cancel: Arc::new(AtomicBool::new(false)),
             cache_rebuild_done: Arc::new(AtomicUsize::new(0)),
             cache_rebuild_total: Arc::new(AtomicUsize::new(0)),
+            export_copy_running: false,
+            export_copy_rx: None,
+            export_copy_cancel: Arc::new(AtomicBool::new(false)),
+            export_copy_progress: Arc::new(ExportCopyProgress::default()),
+            export_copy_result: None,
         };
         if app.startup.first_run {
             app.toast(
@@ -1012,9 +1093,76 @@ impl KakaApp {
         }
     }
 
+    // ---- Import pre-scan (PRD 6.5 第三步 去重扫描) ----
+
+    /// Scan the source folder on a background thread and mark every file
+    /// 待导入/已存在/路径修复 via the three-element comparison. Cancellable.
+    pub fn start_import_prescan(&mut self, path: String, recursive: bool) {
+        if self.import_scan_running || self.state.import_running {
+            return;
+        }
+        self.import_scan_running = true;
+        self.import_scan_files.clear();
+        self.import_scan_selected.clear();
+        self.import_scan_cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::clone(&self.import_scan_cancel);
+        self.import_scan_done.store(0, Ordering::SeqCst);
+        self.import_scan_total.store(0, Ordering::SeqCst);
+        let done = Arc::clone(&self.import_scan_done);
+        let total = Arc::clone(&self.import_scan_total);
+        let (tx, rx) = channel();
+        self.import_scan_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<Option<Vec<crate::app::import::PrescanItem>>> {
+                let mut db = Db::open_default()?;
+                crate::app::import::prescan_mark(
+                    &mut db,
+                    std::path::Path::new(&path),
+                    recursive,
+                    &mut |d, t| {
+                        done.store(d, Ordering::SeqCst);
+                        total.store(t, Ordering::SeqCst);
+                        !cancel.load(Ordering::SeqCst)
+                    },
+                )
+            })();
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Non-blocking drain of pre-scan results; seeds the grid checkbox state
+    /// (待导入 default-checked, 已存在 unchecked; user picks survive rescans).
+    fn poll_import_prescan(&mut self) {
+        let Some(rx) = &self.import_scan_rx else {
+            return;
+        };
+        if let Ok(res) = rx.try_recv() {
+            self.import_scan_rx = None;
+            self.import_scan_running = false;
+            match res {
+                Ok(Some(items)) => {
+                    let prev = std::mem::take(&mut self.import_scan_selected);
+                    for it in &items {
+                        let sel = prev.contains(&it.path) || it.mark == crate::app::import::PrescanMark::New;
+                        if sel {
+                            self.import_scan_selected.insert(it.path.clone());
+                        }
+                    }
+                    self.import_scan_files = items;
+                }
+                Ok(None) => {} // cancelled by the user
+                Err(e) => self.toast(
+                    ToastKind::Error,
+                    format!("{}{e}", t("预扫描失败：", "Pre-scan failed: ")),
+                ),
+            }
+        }
+    }
+
     /// Start an add-mode import on a background thread, streaming progress
-    /// messages back through `import_rx`.
-    pub fn start_add_import(&mut self, path: &str) {
+    /// messages back through `import_rx`. `only` restricts the import to the
+    /// pre-scan-grid-checked paths (PRD 6.5); None imports the whole folder.
+    pub fn start_add_import(&mut self, path: &str, only: Option<Vec<String>>) {
         let (tx, rx) = channel();
         let cancel = Arc::clone(&self.import_cancel);
         self.import_cancel.store(false, Ordering::SeqCst);
@@ -1070,6 +1218,7 @@ impl KakaApp {
                     dedup,
                     &mut prog,
                     &mut on_thumb,
+                    only.as_deref(),
                 )
                 .map_err(|e| e.to_string())
             })();
@@ -1089,6 +1238,7 @@ impl KakaApp {
         source: &str,
         options: crate::app::copy::CopyOptions,
         resume_from: Option<crate::app::session::ImportSession>,
+        only: Option<Vec<String>>,
     ) {
         let (tx, rx) = channel();
         let cancel = Arc::clone(&self.import_cancel);
@@ -1166,6 +1316,7 @@ impl KakaApp {
                     resume_flag,
                     resume_base,
                     &mut prog,
+                    only.as_deref(),
                 )
                 .map_err(|e| e.to_string())?;
                 // On explicit cancel, abandon the session; on a normal finish,
@@ -1556,6 +1707,107 @@ impl KakaApp {
         }
     }
 
+    // ---- Copy export on a background thread (PRD 12.1) ----
+
+    /// Spawn a copy export so the UI never freezes. The disk-space pre-check
+    /// (export_space_guard) runs inside the worker unchanged and fails fast
+    /// through the same result channel.
+    pub fn start_export_copy(&mut self, folder: String, target: String) {
+        if self.export_copy_running {
+            return;
+        }
+        let org = self.export_org;
+        let space_guard = self.state.config.export_space_guard;
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(ExportCopyProgress::default());
+        self.export_copy_running = true;
+        self.export_copy_result = None;
+        self.export_copy_rx = Some(rx);
+        self.export_copy_cancel = Arc::clone(&cancel);
+        self.export_copy_progress = Arc::clone(&progress);
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<crate::app::export::ExportOutcome> {
+                let db = Db::open_default()?;
+                crate::app::export::export_kept_copy(
+                    &db,
+                    &folder,
+                    &target,
+                    org,
+                    true,
+                    true,
+                    space_guard,
+                    &mut |name, done, total| {
+                        if let Ok(mut cur) = progress.current.lock() {
+                            *cur = name.to_string();
+                        }
+                        progress.done.store(done, Ordering::SeqCst);
+                        progress.total.store(total, Ordering::SeqCst);
+                        !cancel.load(Ordering::SeqCst)
+                    },
+                )
+            })();
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Non-blocking drain of copy-export results.
+    fn poll_export_copy(&mut self) {
+        let Some(rx) = &self.export_copy_rx else {
+            return;
+        };
+        if let Ok(res) = rx.try_recv() {
+            self.export_copy_rx = None;
+            self.export_copy_running = false;
+            let cancelled = self.export_copy_cancel.load(Ordering::SeqCst);
+            match res {
+                Ok(out) => {
+                    let report = ExportCopyReport {
+                        copied: out.copied,
+                        failed: out.failed,
+                        cancelled,
+                        failures: out.failures.clone(),
+                    };
+                    let msg = if cancelled {
+                        match i18n::lang() {
+                            i18n::Lang::Zh => format!(
+                                "导出已取消：已完成 {} 张",
+                                report.copied
+                            ),
+                            i18n::Lang::En => {
+                                format!("Export cancelled: {} photos done", report.copied)
+                            }
+                        }
+                    } else {
+                        match i18n::lang() {
+                            i18n::Lang::Zh => format!(
+                                "导出完成：成功 {} 张 / 失败 {} 张",
+                                report.copied, report.failed
+                            ),
+                            i18n::Lang::En => format!(
+                                "Export finished: {} copied, {} failed",
+                                report.copied, report.failed
+                            ),
+                        }
+                    };
+                    if !cancelled && report.failed == 0 {
+                        self.toast(ToastKind::Success, msg);
+                    } else {
+                        self.toast(ToastKind::Warning, msg);
+                    }
+                    self.export_copy_result = Some(Ok(report));
+                }
+                Err(e) => {
+                    self.toast(
+                        ToastKind::Error,
+                        format!("{}{e}", t("导出失败：", "Export failed: ")),
+                    );
+                    self.export_copy_result = Some(Err(e.to_string()));
+                }
+            }
+        }
+    }
+
     /// Non-blocking drain of cleanup results. Small cleans stay silent
     /// (PRD 9.4 边用边删); a settings-triggered full clean toasts the outcome.
     fn poll_cache_clean(&mut self) {
@@ -1645,6 +1897,8 @@ impl eframe::App for KakaApp {
         self.poll_cache_clean();
         self.poll_cache_migrate();
         self.poll_cache_rebuild();
+        self.poll_export_copy();
+        self.poll_import_prescan();
         self.handle_input(&ctx);
 
         // Enqueue missing thumb caches once per workspace.

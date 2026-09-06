@@ -51,14 +51,19 @@ pub fn add_mode_import(
     recursive: bool,
     dedup: bool,
     progress: ProgressFn,
+    only: Option<&[String]>,
 ) -> anyhow::Result<ImportOutcome> {
     let mut noop = |_id: i64, _h: &str, _p: &str| {};
-    add_mode_import_with_thumbs(db, source, recursive, dedup, progress, &mut noop)
+    add_mode_import_with_thumbs(db, source, recursive, dedup, progress, &mut noop, only)
 }
 
 /// Like [`add_mode_import`], but also reports each newly-inserted photo through
 /// `on_thumb` so the caller can request background thumbnail generation while
 /// the import is still running (used to prioritize the first few thumbnails).
+///
+/// `only` restricts the import to the given absolute paths (PRD 6.5 文件网格:
+/// the user picked a subset in the pre-scan grid). Path-repair candidates are
+/// included by the caller so the automatic repair (PRD 6.4) still runs.
 pub fn add_mode_import_with_thumbs(
     db: &mut Db,
     source: &Path,
@@ -66,6 +71,7 @@ pub fn add_mode_import_with_thumbs(
     dedup: bool,
     progress: ProgressFn,
     on_thumb: &mut dyn FnMut(i64, &str, &str),
+    only: Option<&[String]>,
 ) -> anyhow::Result<ImportOutcome> {
     if !source.exists() || !source.is_dir() {
         anyhow::bail!(
@@ -76,6 +82,14 @@ pub fn add_mode_import_with_thumbs(
     }
 
     let items = scanner::scan_folder(source, ScanOptions { recursive })?;
+    // Grid subset (PRD 6.5): only the checked paths are imported.
+    let items = match only {
+        Some(list) => items
+            .into_iter()
+            .filter(|i| list.contains(&i.path.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>(),
+        None => items,
+    };
     let total = items.len();
     let mut outcome = ImportOutcome {
         folder: source.to_string_lossy().into_owned(),
@@ -213,4 +227,115 @@ pub fn add_mode_import_with_thumbs(
 
 fn path_valid(p: &str) -> bool {
     Path::new(p).exists()
+}
+
+/// Pre-scan verdict for one file (PRD 6.5 第三步 去重扫描).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrescanMark {
+    /// Not in the library — will be imported.
+    New,
+    /// Three-element match with a valid library path — already imported.
+    Exists,
+    /// Three-element match but the library path is gone — importing repairs
+    /// the stored path (PRD 6.4) instead of inserting a new photo.
+    PathRepair,
+}
+
+/// One pre-scanned file row (PRD 6.5 / UI 5.1-4 文件网格).
+#[derive(Debug, Clone)]
+pub struct PrescanItem {
+    pub path: String,
+    pub filename: String,
+    pub file_size: i64,
+    pub capture_time: String,
+    /// Thumbnail cache hash for the scan grid (same formula as the library).
+    pub thumb_hash: String,
+    pub mark: PrescanMark,
+    /// RAW+JPG same-stem group index within this scan (None = unpaired).
+    pub pair_group: Option<usize>,
+}
+
+/// Scan `source` and mark every supported file via the three-element
+/// comparison against the library (PRD 6.5 第三步 去重扫描 / PRD 6.4).
+/// `progress(done, total)` runs per file — return false to cancel, which
+/// yields `Ok(None)`. Same-stem RAW+JPG groups (≥2 members in one folder)
+/// are numbered so the grid/stats can report 组.
+pub fn prescan_mark(
+    db: &mut Db,
+    source: &Path,
+    recursive: bool,
+    progress: &mut dyn FnMut(usize, usize) -> bool,
+) -> anyhow::Result<Option<Vec<PrescanItem>>> {
+    if !source.exists() || !source.is_dir() {
+        anyhow::bail!(
+            "{}{}",
+            crate::i18n::t("源路径不存在或不是文件夹: ", "Source path does not exist or is not a folder: "),
+            source.display()
+        );
+    }
+    let items = scanner::scan_folder(source, ScanOptions { recursive })?;
+    let total = items.len();
+    let mut out: Vec<PrescanItem> = Vec::with_capacity(total);
+    for (idx, item) in items.iter().enumerate() {
+        if !progress(idx + 1, total) {
+            return Ok(None);
+        }
+        let ex = exif::parse_exif(&item.path);
+        let capture_time = match &ex.capture_time {
+            Some(t) => t.clone(),
+            None => item
+                .modified
+                .and_then(|t| {
+                    chrono::DateTime::<chrono::Local>::from(t)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                        .into()
+                })
+                .unwrap_or_else(|| "1900-01-01 00:00:00".to_string()),
+        };
+        let mark = match db::photos::find_by_three_elements(
+            db,
+            &item.filename,
+            item.file_size,
+            &capture_time,
+        )? {
+            Some(found) if path_valid(&found.current_path) => PrescanMark::Exists,
+            Some(_) => PrescanMark::PathRepair,
+            None => PrescanMark::New,
+        };
+        let path = item.path.to_string_lossy().into_owned();
+        let thumb_hash = thumbnails::thumb_hash_for(&path, item.file_size, &capture_time);
+        out.push(PrescanItem {
+            path,
+            filename: item.filename.clone(),
+            file_size: item.file_size,
+            capture_time,
+            thumb_hash,
+            mark,
+            pair_group: None,
+        });
+    }
+    // RAW+JPG pairing: same (folder, stem) with ≥2 members forms a group.
+    let mut groups: std::collections::HashMap<(String, String), Vec<usize>> = Default::default();
+    for (i, it) in out.iter().enumerate() {
+        let parent = Path::new(&it.path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stem = Path::new(&it.filename)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        groups.entry((parent, stem)).or_default().push(i);
+    }
+    let mut group_id = 0usize;
+    for members in groups.into_values() {
+        if members.len() >= 2 {
+            for i in members {
+                out[i].pair_group = Some(group_id);
+            }
+            group_id += 1;
+        }
+    }
+    Ok(Some(out))
 }

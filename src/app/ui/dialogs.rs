@@ -100,7 +100,7 @@ fn resume_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     app.import_target = target.clone();
                     app.import_org = opts.org_mode;
                     app.state.show_import = true;
-                    app.start_copy_import(&source, opts, Some(session.clone()));
+                    app.start_copy_import(&source, opts, Some(session.clone()), None);
                     app.show_resume = false;
                     app.pending_resume = None;
                 }
@@ -132,9 +132,10 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     dim_backdrop(ctx);
     egui::Window::new(t("导入照片", "Import Photos"))
         .collapsible(false)
-        .resizable(false)
+        .resizable(true)
+        .default_size([920.0, 680.0])
+        .min_size([720.0, 540.0])
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([680.0, 460.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
             // Mode tabs (window title already says 导入 — no extra heading).
@@ -174,7 +175,13 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"));
+                        if ui
+                            .checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"))
+                            .changed()
+                        {
+                            // 递归开关变化立即重扫（绕过防抖）。
+                            app.import_scan_dirty_since = Some(-1.0e9);
+                        }
                         ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
                     });
                 }
@@ -226,7 +233,13 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Flat, t("全部平铺", "Flat"));
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"));
+                        if ui
+                            .checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"))
+                            .changed()
+                        {
+                            // 递归开关变化立即重扫（绕过防抖）。
+                            app.import_scan_dirty_since = Some(-1.0e9);
+                        }
                         ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
                     });
                     // 清空存储卡 (PRD 6.3): only enabled when the source is a
@@ -245,6 +258,11 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 }
             }
             ui.separator();
+
+            // PRD 6.5 第三步 + UI 5.1-4: pre-scan stats, toolbar and grid.
+            if !app.state.import_running {
+                import_scan_area(app, ui, ctx);
+            }
 
             if app.state.import_running {
                 let p = app.state.import_progress.clone();
@@ -272,31 +290,70 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     app.import_cancel.store(true, Ordering::SeqCst);
                 }
             } else {
-                let btn = egui::Button::new(RichText::new(t("导入", "Import")).size(15.0).strong().color(egui::Color32::from_rgb(0x12, 0x12, 0x12)))
-                    .fill(theme::ACCENT)
-                    .stroke(egui::Stroke::new(1.0, theme::ACCENT));
-                if ui.add(btn).clicked() {
-                    let path = app.import_path.clone();
-                    if path.trim().is_empty() {
-                        app.toast(ToastKind::Warning, t("请选择源路径", "Pick a source folder first"));
-                    } else {
-                        match app.import_mode {
-                            crate::app::state::ImportMode::Add => {
-                                app.start_add_import(path.trim());
-                            }
-                            crate::app::state::ImportMode::Copy => {
-                                if app.import_target.trim().is_empty() {
-                                    app.toast(ToastKind::Warning, t("请选择目标目录", "Pick a target folder first"));
-                                } else {
-                                    let opts = crate::app::copy::CopyOptions {
-                                        target_dir: app.import_target.clone(),
-                                        org_mode: app.import_org,
-                                        recursive: app.import_recursive,
-                                        dedup: app.import_dedup,
-                                        clear_card: app.import_clear_card,
-                                    };
-                                    app.start_copy_import(path.trim(), opts, None);
-                                }
+                // 主按钮：导入 X 张（勾选且待导入的项）。
+                let x = app
+                    .import_scan_files
+                    .iter()
+                    .filter(|f| {
+                        f.mark == crate::app::import::PrescanMark::New
+                            && app.import_scan_selected.contains(&f.path)
+                    })
+                    .count();
+                let label = match i18n::lang() {
+                    i18n::Lang::Zh => format!("导入 {x} 张"),
+                    i18n::Lang::En => format!("Import {x} photos"),
+                };
+                let btn = egui::Button::new(
+                    RichText::new(label).size(15.0).strong().color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
+                )
+                .fill(theme::ACCENT)
+                .stroke(egui::Stroke::new(1.0, theme::ACCENT));
+                let enabled = x > 0 && !app.import_scan_running;
+                if ui.add_enabled(enabled, btn).clicked() {
+                    let path = app.import_path.trim().to_string();
+                    // PRD 6.5: only checked + 待导入 items; add mode also auto
+                    // includes path-repair candidates (PRD 6.4 maintenance).
+                    let mut only: Vec<String> = app
+                        .import_scan_files
+                        .iter()
+                        .filter(|f| {
+                            f.mark == crate::app::import::PrescanMark::New
+                                && app.import_scan_selected.contains(&f.path)
+                        })
+                        .map(|f| f.path.clone())
+                        .collect();
+                    match app.import_mode {
+                        crate::app::state::ImportMode::Add => {
+                            only.extend(
+                                app.import_scan_files
+                                    .iter()
+                                    .filter(|f| f.mark == crate::app::import::PrescanMark::PathRepair)
+                                    .map(|f| f.path.clone()),
+                            );
+                            app.start_add_import(&path, Some(only));
+                        }
+                        crate::app::state::ImportMode::Copy => {
+                            if app.import_target.trim().is_empty() {
+                                app.toast(ToastKind::Warning, t("请选择目标目录", "Pick a target folder first"));
+                            } else {
+                                // 复制模式勾选已存在 = 强制导入.
+                                only.extend(
+                                    app.import_scan_files
+                                        .iter()
+                                        .filter(|f| {
+                                            f.mark == crate::app::import::PrescanMark::Exists
+                                                && app.import_scan_selected.contains(&f.path)
+                                        })
+                                        .map(|f| f.path.clone()),
+                                );
+                                let opts = crate::app::copy::CopyOptions {
+                                    target_dir: app.import_target.clone(),
+                                    org_mode: app.import_org,
+                                    recursive: app.import_recursive,
+                                    dedup: app.import_dedup,
+                                    clear_card: app.import_clear_card,
+                                };
+                                app.start_copy_import(&path, opts, None, Some(only));
                             }
                         }
                     }
@@ -1106,8 +1163,61 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Date, t("按拍摄日期", "By capture date"));
                 ui.radio_value(&mut app.export_org, crate::app::copy::OrgMode::Flat, t("全部平铺", "Flat"));
             });
-            if ui.button(t("开始导出复制", "Start copy export")).clicked() {
+            if app.export_copy_running {
+                // 12.1 后台导出：进度 + 当前文件名 + 取消（UI 不冻结）。
+                let done = app.export_copy_progress.done.load(Ordering::SeqCst);
+                let total = app.export_copy_progress.total.load(Ordering::SeqCst);
+                let current = app
+                    .export_copy_progress
+                    .current
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new(format!("{} ({done}/{total})", t("导出中", "Exporting")))
+                            .size(13.0)
+                            .color(theme::ACCENT),
+                    );
+                    if ui.button(t("取消", "Cancel")).clicked() {
+                        app.export_copy_cancel.store(true, Ordering::SeqCst);
+                    }
+                });
+                ui.label(
+                    RichText::new(current).size(12.0).color(theme::TEXT_WEAK),
+                );
+            } else if ui.button(t("开始导出复制", "Start copy export")).clicked() {
                 copy_clicked = true;
+            }
+            // 已完成一次导出：结果摘要 + 失败列表（保留到下次导出）。
+            if let Some(Ok(report)) = &app.export_copy_result {
+                let summary = if report.cancelled {
+                    match i18n::lang() {
+                        i18n::Lang::Zh => format!("已取消：成功 {} 张 / 未完成 {} 张", report.copied, report.failed),
+                        i18n::Lang::En => format!("Cancelled: {} copied, {} unfinished", report.copied, report.failed),
+                    }
+                } else {
+                    match i18n::lang() {
+                        i18n::Lang::Zh => format!("结果：成功 {} 张 / 失败 {} 张", report.copied, report.failed),
+                        i18n::Lang::En => format!("Result: {} copied, {} failed", report.copied, report.failed),
+                    }
+                };
+                ui.label(RichText::new(summary).size(12.0).color(theme::TEXT_SECONDARY));
+                if !report.failures.is_empty() {
+                    ui.label(RichText::new(t("失败列表：", "Failed files:")).size(12.0).color(theme::DELETE));
+                    egui::ScrollArea::vertical().max_height(72.0).show(ui, |ui| {
+                        for f in &report.failures {
+                            ui.label(RichText::new(f).size(11.0).color(theme::TEXT_WEAK));
+                        }
+                    });
+                }
+            } else if let Some(Err(e)) = &app.export_copy_result {
+                ui.label(
+                    RichText::new(format!("{}{e}", t("导出失败：", "Export failed: ")))
+                        .size(12.0)
+                        .color(theme::DELETE),
+                );
             }
 
             ui.add_space(8.0);
@@ -1151,28 +1261,10 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
         if target.is_empty() {
             app.toast(ToastKind::Warning, t("请先选择导出目录", "Pick an export folder first"));
         } else {
-            let mut progress = |_d: usize, _t: usize| -> bool { true };
-            match crate::app::export::export_kept_copy(
-                &app.state.db,
-                &folder,
-                &target,
-                app.export_org,
-                true,
-                true,
-                app.state.config.export_space_guard,
-                &mut progress,
-            ) {
-                Ok(out) => {
-                    let msg = match i18n::lang() {
-                        i18n::Lang::Zh => format!("导出完成：成功 {} 张 / 失败 {} 张", out.copied, out.failed),
-                        i18n::Lang::En => format!("Export finished: {} copied, {} failed", out.copied, out.failed),
-                    };
-                    app.toast(ToastKind::Success, msg);
-                    app.toast(ToastKind::Info, format!("{}{target}", t("已导出到：", "Exported to: ")));
-                }
-                Err(e) => app.toast(ToastKind::Error, format!("{}{e}", t("导出失败：", "Export failed: "))),
-            }
-            app.state.show_export = false;
+            // 12.1: run on a background thread — the dialog stays open and
+            // shows progress; the result (with failure list) is reported
+            // there and via toast when finished.
+            app.start_export_copy(folder.clone(), target);
         }
     }
     if list_clicked {
@@ -1228,6 +1320,384 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             }
             app.state.show_export = false;
         }
+    }
+}
+
+/// PRD 6.5 第三步 去重扫描 + UI 5.1-4 文件网格: pre-scan status line, stats
+/// bar, toolbar (sort / filter / zoom / select) and the checkable grid.
+fn import_scan_area(app: &mut KakaApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    use crate::app::import::PrescanMark;
+    use crate::app::ui::app::{ImportScanFilter, ImportScanSort};
+
+    // (Re)scan trigger: source path or recursive switch changed. Typed edits
+    // are debounced ~0.5s so each keystroke doesn't restart the scan; the
+    // recursive checkbox and 重新扫描 fire immediately (dirty_since in past).
+    let now = ctx.input(|i| i.time);
+    let key_now = (app.import_path.trim().to_string(), app.import_recursive);
+    if app.import_scan_key.as_ref() == Some(&key_now) {
+        app.import_scan_dirty_since = None;
+    } else if !app.state.import_running {
+        let since = *app.import_scan_dirty_since.get_or_insert(now);
+        if now - since >= 0.5 && !app.import_scan_running {
+            app.import_scan_dirty_since = None;
+            let valid = std::path::Path::new(&key_now.0).is_dir();
+            app.import_scan_key = Some(key_now.clone());
+            if valid {
+                app.start_import_prescan(key_now.0.clone(), key_now.1);
+            } else {
+                app.import_scan_files.clear();
+                app.import_scan_selected.clear();
+            }
+        }
+    }
+
+    if app.import_scan_running {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(18.0));
+            let d = app.import_scan_done.load(Ordering::SeqCst);
+            let tot = app.import_scan_total.load(Ordering::SeqCst);
+            let text = if tot > 0 {
+                format!("{} ({d}/{tot})", t("正在扫描与比对…", "Scanning & comparing…"))
+            } else {
+                t("正在扫描…", "Scanning…").to_string()
+            };
+            ui.label(RichText::new(text).size(13.0).color(theme::ACCENT));
+            if ui.button(t("取消扫描", "Cancel scan")).clicked() {
+                app.import_scan_cancel.store(true, Ordering::SeqCst);
+            }
+        });
+        return;
+    }
+    if app.import_scan_files.is_empty() {
+        ui.horizontal(|ui| {
+            let path_ok = std::path::Path::new(app.import_path.trim()).is_dir();
+            let hint = if app.import_path.trim().is_empty() {
+                t("选择源路径后将自动扫描并列出待导入文件。", "Pick a source folder — files are listed here automatically.")
+            } else if !path_ok {
+                t("源路径不存在或不是文件夹。", "Source path does not exist or is not a folder.")
+            } else {
+                t("扫描已取消，可重新扫描。", "Scan cancelled — rescan anytime.")
+            };
+            ui.label(RichText::new(hint).size(12.0).color(theme::TEXT_WEAK));
+            if path_ok && ui.button(t("重新扫描", "Rescan")).clicked() {
+                app.import_scan_key = None;
+                app.import_scan_dirty_since = None;
+            }
+        });
+        return;
+    }
+
+    // 统计条：源共 N 张，已存在 Y 张，将导入 X 张，RAW+JPG M 组 · 预计大小 S。
+    let n = app.import_scan_files.len();
+    let exists_n = app
+        .import_scan_files
+        .iter()
+        .filter(|f| f.mark != PrescanMark::New)
+        .count();
+    let to_import_n = app
+        .import_scan_files
+        .iter()
+        .filter(|f| f.mark == PrescanMark::New && app.import_scan_selected.contains(&f.path))
+        .count();
+    let pairs = app
+        .import_scan_files
+        .iter()
+        .filter_map(|f| f.pair_group)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let size_bytes: i64 = app
+        .import_scan_files
+        .iter()
+        .filter(|f| f.mark == PrescanMark::New && app.import_scan_selected.contains(&f.path))
+        .map(|f| f.file_size)
+        .sum();
+    let stats = match i18n::lang() {
+        i18n::Lang::Zh => format!(
+            "源共 {n} 张，已存在 {exists_n} 张，将导入 {to_import_n} 张，RAW+JPG {pairs} 组 · 预计大小 {}",
+            crate::app::copy::human_bytes(size_bytes)
+        ),
+        i18n::Lang::En => format!(
+            "{n} files, {exists_n} in library, {to_import_n} to import, {pairs} RAW+JPG pairs · ~{}",
+            crate::app::copy::human_bytes(size_bytes)
+        ),
+    };
+    ui.label(RichText::new(stats).size(12.5).color(theme::TEXT_SECONDARY));
+
+    // 工具栏：排序 / 筛选 / 视图缩放 / 全选反选。
+    let copy_mode = app.import_mode == crate::app::state::ImportMode::Copy;
+    let actionable =
+        |f: &crate::app::import::PrescanItem| -> bool {
+            f.mark == PrescanMark::New || (copy_mode && f.mark == PrescanMark::Exists)
+        };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(t("排序", "Sort")).size(12.0).color(theme::TEXT_WEAK));
+        egui::ComboBox::from_id_salt("import_scan_sort")
+            .selected_text(match app.import_scan_sort {
+                ImportScanSort::CaptureTime => t("拍摄时间", "Capture time"),
+                ImportScanSort::Filename => t("文件名", "Filename"),
+                ImportScanSort::Size => t("大小", "Size"),
+            })
+            .width(92.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.import_scan_sort, ImportScanSort::CaptureTime, t("拍摄时间", "Capture time"));
+                ui.selectable_value(&mut app.import_scan_sort, ImportScanSort::Filename, t("文件名", "Filename"));
+                ui.selectable_value(&mut app.import_scan_sort, ImportScanSort::Size, t("大小", "Size"));
+            });
+        ui.separator();
+        if ui
+            .selectable_label(app.import_scan_filter == ImportScanFilter::All, t("全部", "All"))
+            .clicked()
+        {
+            app.import_scan_filter = ImportScanFilter::All;
+        }
+        if ui
+            .selectable_label(app.import_scan_filter == ImportScanFilter::ToImport, t("仅待导入", "To import"))
+            .clicked()
+        {
+            app.import_scan_filter = ImportScanFilter::ToImport;
+        }
+        if ui
+            .selectable_label(app.import_scan_filter == ImportScanFilter::Exists, t("仅已存在", "Existing"))
+            .clicked()
+        {
+            app.import_scan_filter = ImportScanFilter::Exists;
+        }
+        ui.separator();
+        ui.label(RichText::new(t("视图", "Zoom")).size(12.0).color(theme::TEXT_WEAK));
+        let cell_label = match app.import_scan_cell {
+            0 => "S",
+            2 => "L",
+            _ => "M",
+        };
+        ui.add_sized(
+            [80.0, 20.0],
+            egui::Slider::new(&mut app.import_scan_cell, 0..=2)
+                .show_value(false)
+                .text(cell_label),
+        );
+        ui.separator();
+        if ui
+            .button(t("全选", "Select all"))
+            .on_hover_text(t("仅作用于可勾选项", "Checkable items only"))
+            .clicked()
+        {
+            for f in &app.import_scan_files {
+                if actionable(f) {
+                    app.import_scan_selected.insert(f.path.clone());
+                }
+            }
+        }
+        if ui
+            .button(t("反选", "Invert"))
+            .on_hover_text(t("仅作用于可勾选项", "Checkable items only"))
+            .clicked()
+        {
+            let mut to_remove = Vec::new();
+            for f in &app.import_scan_files {
+                if actionable(f) {
+                    if app.import_scan_selected.contains(&f.path) {
+                        to_remove.push(f.path.clone());
+                    } else {
+                        app.import_scan_selected.insert(f.path.clone());
+                    }
+                }
+            }
+            for p in to_remove {
+                app.import_scan_selected.remove(&p);
+            }
+        }
+    });
+
+    // 文件网格：宽度自适应每行 4-10 张。
+    let cell = crate::app::ui::app::IMPORT_SCAN_CELL_SIZES[app.import_scan_cell];
+    let cols = ((ui.available_width() / (cell + 8.0)).floor() as usize).clamp(4, 10);
+    let mut order: Vec<usize> = (0..app.import_scan_files.len()).collect();
+    match app.import_scan_sort {
+        ImportScanSort::CaptureTime => order.sort_by(|&a, &b| {
+            app.import_scan_files[a]
+                .capture_time
+                .cmp(&app.import_scan_files[b].capture_time)
+                .then_with(|| app.import_scan_files[a].filename.cmp(&app.import_scan_files[b].filename))
+        }),
+        ImportScanSort::Filename => {
+            order.sort_by(|&a, &b| app.import_scan_files[a].filename.cmp(&app.import_scan_files[b].filename))
+        }
+        ImportScanSort::Size => {
+            order.sort_by(|&a, &b| app.import_scan_files[b].file_size.cmp(&app.import_scan_files[a].file_size))
+        }
+    }
+    order.retain(|&i| match app.import_scan_filter {
+        ImportScanFilter::All => true,
+        ImportScanFilter::ToImport => app.import_scan_files[i].mark == PrescanMark::New,
+        ImportScanFilter::Exists => app.import_scan_files[i].mark != PrescanMark::New,
+    });
+    // 为底部主按钮行预留空间（egui 坑：占满 available 会把按钮挤出窗口）。
+    let grid_h = (ui.available_height() - 70.0).max(140.0);
+    egui::ScrollArea::vertical()
+        .max_height(grid_h)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            egui::Grid::new("import_scan_grid")
+                .spacing([6.0, 6.0])
+                .show(ui, |ui| {
+                    for chunk in order.chunks(cols) {
+                        for &i in chunk {
+                            import_scan_cell(app, ui, i, cell, copy_mode);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+/// One cell of the import pre-scan grid: 140x140-style frame + thumbnail
+/// (Spinner placeholder while the background job runs), checkbox overlay,
+/// grayed + bottom label for 已存在, hover accent border.
+fn import_scan_cell(
+    app: &mut KakaApp,
+    ui: &mut egui::Ui,
+    idx: usize,
+    cell: f32,
+    copy_mode: bool,
+) {
+    use crate::app::import::PrescanMark;
+    let item = &app.import_scan_files[idx];
+    let selected = app.import_scan_selected.contains(&item.path);
+    let actionable = item.mark == PrescanMark::New
+        || (copy_mode && item.mark == PrescanMark::Exists);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::hover());
+    let painter = ui.painter();
+    let stroke = if resp.hovered() {
+        egui::Stroke::new(1.5, theme::ACCENT)
+    } else {
+        egui::Stroke::new(1.0, theme::BORDER_2)
+    };
+    painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+
+    // Thumbnail (background-generated; Spinner placeholder until ready).
+    let inner = rect.shrink(6.0);
+    let fake = PhotoListItem {
+        id: -(idx as i64) - 1, // synthetic id: never collides with library ids
+        original_filename: item.filename.clone(),
+        current_path: item.path.clone(),
+        folder_path: String::new(),
+        status: Status::Untreated,
+        capture_time: item.capture_time.clone(),
+        file_size: item.file_size,
+        thumb_hash: Some(item.thumb_hash.clone()),
+        camera_model: None,
+        lens_model: None,
+        iso: None,
+        aperture: None,
+        shutter_speed: None,
+        focal_length: None,
+        decode_failed: false,
+        preview_only: false,
+        pair_group_id: None,
+        rotation_override: 0,
+    };
+    let (tex, needs) = app.textures.texture_for(ui.ctx(), &fake);
+    if needs {
+        app.thumbs.enqueue(fake.id, &item.thumb_hash, &item.path);
+        egui::Spinner::new().size(22.0).paint_at(
+            ui,
+            egui::Rect::from_center_size(rect.center(), egui::vec2(26.0, 26.0)),
+        );
+    } else {
+        let ts = tex.size_vec2();
+        let scale = (inner.width() / ts.x).min(inner.height() / ts.y).min(1.0);
+        let img_rect = egui::Rect::from_center_size(inner.center(), ts * scale);
+        let tint = if item.mark == PrescanMark::New {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_rgb(150, 150, 150) // 已存在灰显
+        };
+        painter.image(
+            tex.id(),
+            img_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            tint,
+        );
+    }
+
+    // Checkbox overlay (top-left). 已存在 in add mode is disabled with a
+    // tooltip; in copy mode it means 强制导入.
+    let cb_rect =
+        egui::Rect::from_min_size(rect.min + egui::vec2(5.0, 5.0), egui::vec2(17.0, 17.0));
+    let cb = ui.interact(cb_rect, egui::Id::new(("import_scan_cb", idx)), egui::Sense::click());
+    painter.rect_filled(
+        cb_rect,
+        2.0,
+        if selected && actionable {
+            theme::ACCENT
+        } else {
+            egui::Color32::from_rgb(0x1e, 0x1e, 0x1e)
+        },
+    );
+    painter.rect_stroke(
+        cb_rect,
+        2.0,
+        egui::Stroke::new(1.0, if actionable { theme::ACCENT } else { theme::BORDER }),
+        egui::StrokeKind::Inside,
+    );
+    if selected && actionable {
+        let dark = egui::Stroke::new(2.0, egui::Color32::from_rgb(0x12, 0x12, 0x12));
+        painter.line_segment(
+            [
+                cb_rect.left_top() + egui::vec2(3.0, 8.0),
+                cb_rect.center() + egui::vec2(-1.0, 3.0),
+            ],
+            dark,
+        );
+        painter.line_segment(
+            [
+                cb_rect.center() + egui::vec2(-1.0, 3.0),
+                cb_rect.right_bottom() + egui::vec2(-3.0, -4.0),
+            ],
+            dark,
+        );
+    }
+    if cb.clicked() && actionable {
+        if selected {
+            app.import_scan_selected.remove(&item.path);
+        } else {
+            app.import_scan_selected.insert(item.path.clone());
+        }
+    }
+    if !actionable {
+        cb.on_hover_text(match item.mark {
+            PrescanMark::PathRepair => t(
+                "已在图库（源路径变化），导入时将自动修复路径。",
+                "Already in the library (path changed) — importing repairs the path.",
+            ),
+            _ => t(
+                "已存在于图库，添加模式不支持强制导入。",
+                "Already in the library — add mode cannot force-import.",
+            ),
+        });
+    }
+
+    // 底部状态标签。
+    if item.mark != PrescanMark::New {
+        let (text, color) = if selected && copy_mode {
+            (t("强制导入", "Force import"), theme::ACCENT)
+        } else if item.mark == PrescanMark::PathRepair {
+            (t("路径将修复", "Path repair"), theme::TEXT_WEAK)
+        } else {
+            (t("已存在，跳过", "Exists, skipped"), theme::TEXT_WEAK)
+        };
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - 16.0),
+            egui::pos2(rect.right(), rect.bottom()),
+        );
+        painter.rect_filled(strip, 0.0, egui::Color32::from_black_alpha(150));
+        painter.text(
+            egui::pos2(strip.left() + 4.0, strip.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::FontId::proportional(10.0),
+            color,
+        );
     }
 }
 

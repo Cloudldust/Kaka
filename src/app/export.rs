@@ -25,8 +25,8 @@ pub enum ExportFileFormat {
     Csv,
 }
 
-/// Progress callback for export: (done, total) -> continue?
-pub type ExportProgress<'a> = &'a mut dyn FnMut(usize, usize) -> bool;
+/// Progress callback for export: (current_filename, done, total) -> continue?
+pub type ExportProgress<'a> = &'a mut dyn FnMut(&str, usize, usize) -> bool;
 
 /// 12.1: copy every kept photo (status != Delete) into `target_dir`, organized
 /// by `org`. RAW+JPG pairs are copied together. Optionally copies the original
@@ -146,7 +146,11 @@ pub fn export_kept_copy(
     }
     let mut done = 0usize;
     for (src, dest) in &files {
-        if !progress(done, total) {
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !progress(&name, done, total) {
             // Cancelled.
             outcome.failed = total.saturating_sub(done);
             return Ok(outcome);
@@ -265,12 +269,37 @@ fn sidecar_for(path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Write a minimal sidecar XMP to `dest` with the given label, rating and
-/// orientation. Creates the parent dir if needed. The packet template lives in
+/// Write the keep-mark sidecar to `dest` with the given label, rating and
+/// orientation. MERGES into an existing sidecar: its fields are preserved and
+/// only xmp:Label / xmp:Rating / tiff:Orientation are added or replaced, so
+/// externally-written metadata (keywords, captions, …) survives. A file that
+/// is not recognisable XMP is rebuilt as a fresh standard packet (WARN log).
+/// Creates the parent dir if needed. The packet template lives in
 /// `io::xmp::rating_xml` (shared with the in-file embedding path).
 fn write_xmp_to(dest: &Path, label: &str, rating: u8, orientation: i64) -> anyhow::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    if dest.exists() {
+        match std::fs::read_to_string(dest) {
+            Ok(original) => match crate::io::xmp::merge_rating_fields(
+                &original,
+                label,
+                rating,
+                orientation,
+            ) {
+                Some(merged) => {
+                    std::fs::write(dest, merged)?;
+                    return Ok(());
+                }
+                None => {
+                    log::warn!("XMP 侧车不是合法 XMP，已重建为标准结构: {}", dest.display());
+                }
+            },
+            Err(_) => {
+                log::warn!("XMP 侧车不可读（非 UTF-8？），已重建为标准结构: {}", dest.display());
+            }
+        }
     }
     std::fs::write(dest, crate::io::xmp::rating_xml(label, rating, orientation))?;
     Ok(())

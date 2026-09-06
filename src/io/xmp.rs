@@ -217,6 +217,111 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// Merge the keep-mark fields (xmp:Label / xmp:Rating / tiff:Orientation)
+/// into an existing XMP packet, preserving every other field. Only those
+/// three are added or replaced (both element-form and attribute-form
+/// occurrences of them are removed first); missing namespace declarations
+/// are added to the rdf:Description tag. Returns None when `existing` is not
+/// recognisable XMP — the caller then falls back to a fresh standard packet
+/// and logs a warning.
+pub fn merge_rating_fields(
+    existing: &str,
+    label: &str,
+    rating: u8,
+    orientation: i64,
+) -> Option<String> {
+    // Minimal structure check: an XMP packet wraps an rdf:Description.
+    if !existing.contains("<x:xmpmeta") || !existing.contains("<rdf:RDF") {
+        return None;
+    }
+    let open_start = existing.find("<rdf:Description")?;
+    let open_end = existing[open_start..].find('>')? + open_start;
+    let close_start = existing[open_start..].find("</rdf:Description>")? + open_start;
+    if close_start <= open_end {
+        return None;
+    }
+    let head = &existing[..open_start];
+    let mut open_tag = existing[open_start..=open_end].to_string();
+    let body = existing[open_end + 1..close_start].to_string();
+    let tail = &existing[close_start..];
+
+    // The inserted fields need their namespaces declared on the Description.
+    for (decl, ns) in [
+        ("xmlns:xmp=", "http://ns.adobe.com/xap/1.0/"),
+        ("xmlns:tiff=", "http://ns.adobe.com/tiff/1.0/"),
+    ] {
+        if !open_tag.contains(decl) {
+            open_tag.insert_str(open_tag.len() - 1, &format!(" {decl}\"{ns}\""));
+        }
+    }
+    // Drop attribute-shorthand occurrences of our fields (some writers use
+    // <rdf:Description ... xmp:Rating="3" ...>).
+    strip_attr(&mut open_tag, "xmp:Label");
+    strip_attr(&mut open_tag, "xmp:Rating");
+    strip_attr(&mut open_tag, "tiff:Orientation");
+
+    // Drop element-form occurrences of our fields from the body.
+    let body = strip_element(body, "xmp:Label");
+    let body = strip_element(body, "xmp:Rating");
+    let body = strip_element(body, "tiff:Orientation");
+
+    let orient_xml = if orientation != 0 {
+        format!("\n   <tiff:Orientation>{orientation}</tiff:Orientation>")
+    } else {
+        String::new()
+    };
+    let inject = format!(
+        "\n   <xmp:Label>{label}</xmp:Label>\n   <xmp:Rating>{rating}</xmp:Rating>{orient_xml}"
+    );
+    Some(format!("{head}{open_tag}{body}{inject}{tail}"))
+}
+
+/// Remove `name="value"` attribute occurrences from a tag string.
+fn strip_attr(tag: &mut String, name: &str) {
+    let needle = format!("{name}=\"");
+    while let Some(pos) = tag.find(&needle) {
+        let after = pos + needle.len();
+        let Some(end_rel) = tag[after..].find('"') else { break };
+        tag.replace_range(pos..after + end_rel + 1, "");
+    }
+}
+
+/// Remove `<name>…</name>` (or self-closing `<name/>`) element occurrences
+/// from a body string, keeping everything else byte-identical.
+fn strip_element(body: String, name: &str) -> String {
+    let open = format!("<{name}");
+    let close = format!("</{name}>");
+    let mut result = String::with_capacity(body.len());
+    let mut pos = 0usize;
+    while let Some(rel) = body[pos..].find(&open) {
+        let start = pos + rel;
+        result.push_str(&body[pos..start]);
+        let after_open = start + open.len();
+        let next = body[after_open..].chars().next();
+        let is_element = matches!(
+            next,
+            Some('>') | Some('/') | Some(' ') | Some('\n') | Some('\r') | Some('\t')
+        );
+        if !is_element {
+            // False positive like <xmp:RatingX — keep and continue scanning.
+            result.push_str(&body[start..after_open]);
+            pos = after_open;
+            continue;
+        }
+        if next == Some('/') {
+            let Some(end_rel) = body[after_open..].find('>') else { break };
+            pos = after_open + end_rel + 1;
+        } else {
+            match body[after_open..].find(&close) {
+                Some(c) => pos = after_open + c + close.len(),
+                None => break, // malformed; keep the remainder untouched
+            }
+        }
+    }
+    result.push_str(&body[pos..]);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +416,69 @@ mod tests {
         image::load_from_memory(&twice).unwrap();
 
         assert!(png_embed(&[0x00; 16], &xml).is_err());
+    }
+
+    const FOREIGN_XMP: &str = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">
+   <dc:description><rdf:Alt><rdf:li xml:lang="x-default">Custom caption</rdf:li></rdf:Alt></dc:description>
+   <photoshop:City>Qingdao</photoshop:City>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+
+    #[test]
+    fn merge_preserves_foreign_fields() {
+        let merged = merge_rating_fields(FOREIGN_XMP, "Kaka:Keep", 4, 90).unwrap();
+        // Original fields survive untouched.
+        assert!(merged.contains("Custom caption"));
+        assert!(merged.contains("<photoshop:City>Qingdao</photoshop:City>"));
+        // Our three fields are present, namespaces auto-declared.
+        assert!(merged.contains("<xmp:Rating>4</xmp:Rating>"));
+        assert!(merged.contains("<xmp:Label>Kaka:Keep</xmp:Label>"));
+        assert!(merged.contains("<tiff:Orientation>90</tiff:Orientation>"));
+        assert!(merged.contains("xmlns:xmp="));
+        assert!(merged.contains("xmlns:tiff="));
+
+        // Re-merge is idempotent: single occurrence, replaced values.
+        let merged2 = merge_rating_fields(&merged, "Kaka:Keep", 2, 0).unwrap();
+        assert_eq!(merged2.matches("<xmp:Rating>").count(), 1);
+        assert!(merged2.contains("<xmp:Rating>2</xmp:Rating>"));
+        assert!(merged2.contains("<xmp:Label>Kaka:Keep</xmp:Label>"));
+        assert!(!merged2.contains("<tiff:Orientation>90"));
+        assert!(merged2.contains("Custom caption"));
+    }
+
+    #[test]
+    fn merge_replaces_element_and_attribute_forms() {
+        let existing = "<x:xmpmeta><rdf:RDF><rdf:Description rdf:about=\"\" \
+            xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"3\" xmp:Label=\"OldAttr\">\
+            <xmp:Label>OldEl</xmp:Label><xmp:Rating>1</xmp:Rating>\
+            <dc:title>T</dc:title></rdf:Description></rdf:RDF></x:xmpmeta>";
+        let merged = merge_rating_fields(existing, "Kaka:Keep", 5, 0).unwrap();
+        assert!(!merged.contains("xmp:Rating=\"3\""));
+        assert!(!merged.contains("xmp:Label=\"OldAttr\""));
+        assert!(!merged.contains("OldEl"));
+        assert!(merged.matches("<xmp:Rating>").count() == 1);
+        assert!(merged.contains("<xmp:Rating>5</xmp:Rating>"));
+        assert!(merged.contains("<dc:title>T</dc:title>"));
+    }
+
+    #[test]
+    fn merge_rejects_non_xmp() {
+        assert!(merge_rating_fields("<html><body>hi</body></html>", "K", 3, 0).is_none());
+        // Metadata but no rdf:Description to merge into.
+        assert!(merge_rating_fields(
+            "<x:xmpmeta><rdf:RDF></rdf:RDF></x:xmpmeta>",
+            "K",
+            3,
+            0
+        )
+        .is_none());
     }
 
     #[test]

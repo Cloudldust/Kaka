@@ -108,13 +108,13 @@ fn add_mode_import_dedup_and_insert() {
     make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
 
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    let outcome = import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    let outcome = import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
     assert_eq!(outcome.added, 2);
     assert_eq!(outcome.skipped_existing, 0);
     assert_eq!(outcome.failed, 0);
 
     // Second run: same files, dedup should skip both.
-    let outcome2 = import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    let outcome2 = import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
     assert_eq!(outcome2.added, 0);
     assert_eq!(outcome2.skipped_existing, 2);
 
@@ -203,7 +203,7 @@ fn copy_mode_flat_conflicts_and_dedup() {
         clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
+    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
     assert_eq!(out.copied, 3, "all three photos should be copied");
     assert_eq!(out.failed, 0);
 
@@ -223,7 +223,7 @@ fn copy_mode_flat_conflicts_and_dedup() {
     }
 
     // Re-import: dedup skips all.
-    let out2 = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
+    let out2 = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
     assert_eq!(out2.copied, 0);
     assert_eq!(out2.skipped_existing, 3);
 }
@@ -250,7 +250,7 @@ fn copy_mode_structure_preserves_relative_dirs() {
         clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
+    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
     assert_eq!(out.copied, 2);
     assert!(target.join("DSC_0001.JPG").exists());
     assert!(target.join("100NIKON/DSC_0002.JPG").exists(), "structure mode should keep relative dirs");
@@ -351,7 +351,7 @@ fn copy_mode_date_subfolder() {
         clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
+    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
     assert_eq!(out.copied, 1);
     // No EXIF -> capture via mtime (today), so a date subfolder is created.
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -384,7 +384,7 @@ fn copy_mode_resume_progress_continues_from_base() {
         clear_card: false,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog).unwrap();
+    let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
     assert_eq!(out.copied, 2);
 
     // Add a third file that is not yet imported.
@@ -400,7 +400,7 @@ fn copy_mode_resume_progress_continues_from_base() {
             }
             true
         };
-        let out2 = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, true, 2, &mut prog).unwrap();
+        let out2 = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, true, 2, &mut prog, None).unwrap();
         assert_eq!(out2.copied, 1, "only the new file should be copied");
         assert_eq!(out2.skipped_existing, 2, "the two existing files are skipped as duplicates");
         assert_eq!(copy_phase_max, 3, "copy progress should continue from base=2 to 3");
@@ -424,7 +424,7 @@ fn m3_undo_redo_and_selection() {
         make_jpeg(&src.join(format!("DSC_{i:04}.JPG")), [i as u8, 40, 80]);
     }
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
 
     let mut app = AppState::new(db, AppConfig::default());
     app.open_workspace(&src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc).unwrap();
@@ -504,7 +504,7 @@ fn advanced_filter_status_format_missing() {
     make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
     make_jpeg(&src.join("DSC_0003.JPG"), [70, 80, 90]);
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
 
     let folder = src.to_string_lossy();
     let items = db::photos::list_items_in_folder(&db, &folder, kaka::model::SortOrder::FilenameAsc).unwrap();
@@ -553,7 +553,7 @@ fn export_kept_copy_and_file_list() {
     make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
     make_jpeg(&src.join("DSC_0003.JPG"), [70, 80, 90]);
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
 
     let folder = src.to_string_lossy();
     // Mark one photo as Delete so it is excluded from the export.
@@ -562,7 +562,7 @@ fn export_kept_copy_and_file_list() {
 
     // 12.1: copy kept photos to a flat target dir.
     let target = root.join("out");
-    let mut xp = |_d: usize, _t: usize| -> bool { true };
+    let mut xp = |_n: &str, _d: usize, _t: usize| -> bool { true };
     let out = export_kept_copy(&db, &folder, &target.to_string_lossy(), OrgMode::Flat, false, false, true, &mut xp).unwrap();
     assert_eq!(out.total, 2, "only the two kept photos should be exported");
     assert_eq!(out.copied, 2);
@@ -738,7 +738,7 @@ fn decode_failed_flag_roundtrip() {
     std::fs::create_dir_all(&src).unwrap();
     make_jpeg(&src.join("DSC_0001.JPG"), [5, 10, 15]);
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
 
     let items =
         db::photos::list_items_in_folder(&db, &src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc).unwrap();
@@ -779,7 +779,7 @@ fn import_then_open_workspace_across_connections() {
     let src_str = src.to_string_lossy().into_owned();
     let bordered = format!("{src_str}\\");
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    let outcome = import::add_mode_import(&mut db, std::path::Path::new(&bordered), true, true, &mut prog).unwrap();
+    let outcome = import::add_mode_import(&mut db, std::path::Path::new(&bordered), true, true, &mut prog, None).unwrap();
     assert_eq!(outcome.added, 28);
 
     // Open the workspace using a DIFFERENT connection (as the GUI thread does).
@@ -820,7 +820,7 @@ fn rotation_override_roundtrip_and_list_mapping() {
     std::fs::create_dir_all(&src).unwrap();
     make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
 
     let mut app = AppState::new(db, AppConfig::default());
     app.open_workspace(&src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc)
@@ -869,7 +869,7 @@ fn step_wrap_at_end_toggle() {
         make_jpeg(&src.join(format!("DSC_{i:04}.JPG")), [i as u8, 30, 60]);
     }
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
 
     let mut app = AppState::new(db, AppConfig::default());
     app.open_workspace(&src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc).unwrap();
@@ -946,7 +946,7 @@ fn cache_rebuild_regenerates_missing_and_counts_failures() {
     make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
 
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
-    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
     let items = db::photos::list_items_in_folder(
         &db,
         &src.to_string_lossy(),
@@ -998,4 +998,121 @@ fn cache_rebuild_regenerates_missing_and_counts_failures() {
     assert_eq!(done, 0);
     assert!(!thumbnails::thumb_path(&hash(&items[1]), 1.0).exists());
     assert!(!thumbnails::preview_path(&hash(&items[1])).exists());
+}
+
+#[test]
+fn write_xmp_sidecars_merges_existing_sidecar() {
+    use kaka::app::export::write_xmp_sidecars;
+
+    let root = temp_root();
+    let db_path = root.join("xmp_merge.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("import");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [10, 20, 30]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
+
+    // A pre-existing sidecar written by another tool, with custom fields.
+    let sidecar = src.join("DSC_0001.xmp");
+    std::fs::write(
+        &sidecar,
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">
+   <dc:description><rdf:Alt><rdf:li xml:lang="x-default">Custom caption</rdf:li></rdf:Alt></dc:description>
+   <photoshop:City>Qingdao</photoshop:City>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#,
+    )
+    .unwrap();
+
+    let n = write_xmp_sidecars(&db, &src.to_string_lossy(), 4).unwrap();
+    assert_eq!(n, 1);
+
+    let out = std::fs::read_to_string(&sidecar).unwrap();
+    // Original fields preserved…
+    assert!(out.contains("Custom caption"), "custom caption lost:\n{out}");
+    assert!(out.contains("<photoshop:City>Qingdao</photoshop:City>"));
+    // …and the keep-mark fields written.
+    assert!(out.contains("<xmp:Rating>4</xmp:Rating>"));
+    assert!(out.contains("<xmp:Label>Kaka:Keep</xmp:Label>"));
+}
+
+#[test]
+fn import_prescan_marks_new_exists_and_repair() {
+    use kaka::app::import::{prescan_mark, PrescanMark};
+
+    let root = temp_root();
+    let db_path = root.join("prescan.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    // dirA holds the first import; dirB will hold a moved copy of one file.
+    let dir_a = root.join("a");
+    let dir_b = root.join("b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    make_jpeg(&dir_a.join("DSC_0001.JPG"), [10, 20, 30]); // will move to dirB
+    make_jpeg(&dir_a.join("DSC_0002.JPG"), [40, 50, 60]); // stays → Exists
+
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &dir_a, true, true, &mut prog, None).unwrap();
+
+    // Move DSC_0001 to dirB (rename keeps size + mtime → same three elements)
+    // and delete the original so the library path becomes invalid.
+    std::fs::rename(dir_a.join("DSC_0001.JPG"), dir_b.join("DSC_0001.JPG")).unwrap();
+    // A genuinely new file the library has never seen.
+    make_jpeg(&dir_a.join("DSC_0003.JPG"), [70, 80, 90]);
+
+    let mut cancelled_checks = 0usize;
+    let items = prescan_mark(&mut db, &root, true, &mut |d, t| {
+        if d >= 2 {
+            cancelled_checks += 1;
+            return false; // exercise the cancel path once past the first files
+        }
+        true
+    })
+    .unwrap();
+    assert!(items.is_none(), "cancel should yield None");
+    let _ = cancelled_checks;
+
+    // Full scan (no cancel).
+    let items = prescan_mark(&mut db, &root, true, &mut |_d, _t| true)
+        .unwrap()
+        .unwrap();
+    let mark_of = |name: &str| {
+        items
+            .iter()
+            .find(|i| i.filename == name)
+            .unwrap_or_else(|| panic!("{name} missing"))
+            .mark
+    };
+    assert_eq!(mark_of("DSC_0002.JPG"), PrescanMark::Exists, "in library + valid path");
+    assert_eq!(
+        mark_of("DSC_0001.JPG"),
+        PrescanMark::PathRepair,
+        "three-element match but library path is gone"
+    );
+    assert_eq!(mark_of("DSC_0003.JPG"), PrescanMark::New);
+    // Repair items point at the new location (dirB), not the stale one.
+    let repair = items.iter().find(|i| i.mark == PrescanMark::PathRepair).unwrap();
+    assert!(repair.path.ends_with("DSC_0001.JPG"));
+    assert_ne!(repair.path, dir_a.join("DSC_0001.JPG").to_string_lossy());
+
+    // Non-recursive scan of dirB sees only the moved file.
+    let items_b = prescan_mark(&mut db, &dir_b, false, &mut |_d, _t| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(items_b.len(), 1);
+    assert_eq!(items_b[0].mark, PrescanMark::PathRepair);
 }
