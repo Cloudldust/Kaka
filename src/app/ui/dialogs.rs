@@ -128,19 +128,116 @@ fn dim_backdrop(ctx: &egui::Context) {
     painter.rect_filled(screen, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 0x66));
 }
 
+/// PRD 6.8: the scrollable failure detail table (源路径/目标路径/原因/大小/时间).
+fn failures_table(
+    ui: &mut egui::Ui,
+    failures: &[crate::app::import::ImportFailure],
+    show_target: bool,
+) {
+    let head = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).size(11.0).strong().color(theme::TEXT_SECONDARY));
+    };
+    // 滚动条常显（用户可知下方还有内容），末列留白避免滚动条压住文字。
+    let spacer = |ui: &mut egui::Ui| {
+        ui.allocate_exact_size(egui::vec2(14.0, 1.0), egui::Sense::hover());
+    };
+    egui::ScrollArea::vertical()
+        .max_height(120.0)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .show(ui, |ui| {
+            egui::Grid::new("import_report_failures")
+                .striped(true)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    head(ui, t("#", "#"));
+                    head(ui, t("源路径", "Source"));
+                    if show_target {
+                        head(ui, t("目标路径", "Target"));
+                    }
+                    head(ui, t("原因", "Reason"));
+                    head(ui, t("大小", "Size"));
+                    head(ui, t("拍摄时间", "Capture time"));
+                    spacer(ui);
+                    ui.end_row();
+                    for (i, f) in failures.iter().enumerate() {
+                        ui.label(RichText::new(format!("{}", i + 1)).size(11.0));
+                        ui.label(RichText::new(&f.source_path).size(11.0).color(theme::TEXT_WEAK));
+                        if show_target {
+                            ui.label(
+                                RichText::new(f.target_path.as_str())
+                                    .size(11.0)
+                                    .color(theme::TEXT_WEAK),
+                            );
+                        }
+                        ui.label(
+                            RichText::new(format!("{}（{}）", f.reason_code, f.reason))
+                                .size(11.0)
+                                .color(theme::DELETE),
+                        );
+                        ui.label(
+                            RichText::new(crate::app::copy::human_bytes(f.file_size)).size(11.0),
+                        );
+                        ui.label(RichText::new(&f.capture_time).size(11.0));
+                        spacer(ui);
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+/// PRD 6.8: the scrollable path-repair detail table (旧路径→新路径).
+fn repairs_table(ui: &mut egui::Ui, repairs: &[crate::app::import::PathRepair]) {
+    let head = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).size(11.0).strong().color(theme::TEXT_SECONDARY));
+    };
+    let spacer = |ui: &mut egui::Ui| {
+        ui.allocate_exact_size(egui::vec2(14.0, 1.0), egui::Sense::hover());
+    };
+    egui::ScrollArea::vertical()
+        .max_height(120.0)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .show(ui, |ui| {
+            egui::Grid::new("import_report_repairs")
+                .striped(true)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    head(ui, t("#", "#"));
+                    head(ui, t("原始文件名", "Filename"));
+                    head(ui, t("旧路径", "Old path"));
+                    head(ui, t("新路径", "New path"));
+                    head(ui, t("修复时间", "Repaired at"));
+                    spacer(ui);
+                    ui.end_row();
+                    for (i, r) in repairs.iter().enumerate() {
+                        ui.label(RichText::new(format!("{}", i + 1)).size(11.0));
+                        ui.label(RichText::new(&r.original_filename).size(11.0));
+                        ui.label(RichText::new(&r.old_path).size(11.0).color(theme::DELETE));
+                        ui.label(RichText::new(&r.new_path).size(11.0).color(theme::KEEP));
+                        ui.label(RichText::new(&r.repaired_at).size(11.0).color(theme::TEXT_WEAK));
+                        spacer(ui);
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     dim_backdrop(ctx);
     // 位置只计算一次（存入窗口状态），之后不再重算：anchor + 逐帧居中会让
     // egui 的两轮布局互相追逐，窗口整体左右 ±44px 振荡（抖动）。
     let px = ((ctx.input(|i| i.viewport_rect().width()) - 1160.0) / 2.0).max(8.0);
     let py = 40.0;
+    // 窗口按状态取尺寸：无网格（扫描中/已取消/空）用紧凑尺寸，网格出现才
+    // 展开——两种状态各自尺寸固定，不会重新引入逐帧的 auto-size 反馈回路。
+    // 1160 宽让 S 档正好 10 列、M 档 7 列、L 档 6 列。
+    let grid_visible = !app.state.import_running
+        && !app.import_scan_running
+        && !app.import_scan_files.is_empty();
+    let win_size = if grid_visible { [1160.0, 700.0] } else { [720.0, 480.0] };
     egui::Window::new(t("导入照片", "Import Photos"))
         .collapsible(false)
-        // 固定尺寸（不可 auto-size）：列数从 available_width 推导，可伸缩
-        // 窗口会形成 窗口→列数→网格宽→窗口 的反馈回路（拖视图滑条时抖动、
-        // 窗口被撑大）。1160 宽让 S 档正好 10 列、M 档 7 列、L 档 6 列。
         .resizable(false)
-        .fixed_size([1160.0, 700.0])
+        .fixed_size(win_size)
         .default_pos(egui::pos2(px, py))
         .frame(dialog_frame())
         .show(ctx, |ui| {
@@ -366,7 +463,7 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 }
             }
 
-            if let Some(res) = &app.state.import_result {
+            if let Some(res) = app.state.import_result.clone() {
                 ui.separator();
                 match res {
                     Ok(outcome) => {
@@ -377,11 +474,87 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                                     i18n::Lang::En => format!("Added {} photos ({} skipped as existing, {} failed, {} paths repaired)", o.added, o.skipped_existing, o.failed, o.path_repaired),
                                 };
                                 ui.label(RichText::new(msg).size(14.0).color(theme::KEEP));
-                                if !o.failures.is_empty() {
-                                    ui.label(RichText::new(t("失败列表（前3条）：", "Failures (first 3):")).size(12.0).color(theme::DELETE));
-                                    for f in o.failures.iter().take(3) {
-                                        ui.label(RichText::new(f).size(12.0).color(theme::TEXT_WEAK));
+                                use crate::app::ui::app::ImportReportView;
+                                ui.horizontal(|ui| {
+                                    // PRD 6.8: 展开失败 / 路径修复明细。
+                                    if !o.failures.is_empty()
+                                        && ui.button(t("查看失败列表", "View failure list")).clicked()
+                                    {
+                                        app.import_report_view = match app.import_report_view {
+                                            Some(ImportReportView::Failures) => None,
+                                            _ => Some(ImportReportView::Failures),
+                                        };
                                     }
+                                    if o.path_repaired > 0
+                                        && ui.button(t("查看路径修复列表", "View path repairs")).clicked()
+                                    {
+                                        app.import_report_view = match app.import_report_view {
+                                            Some(ImportReportView::Repairs) => None,
+                                            _ => Some(ImportReportView::Repairs),
+                                        };
+                                    }
+                                });
+                                if !o.failures.is_empty()
+                                    && app.import_report_view == Some(ImportReportView::Failures)
+                                {
+                                    failures_table(ui, &o.failures, false);
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .button(t("导出失败列表 .csv", "Export failures .csv"))
+                                            .clicked()
+                                        {
+                                            if let Some(p) = rfd::FileDialog::new()
+                                                .add_filter("CSV", &["csv"])
+                                                .set_file_name("导入失败列表.csv")
+                                                .save_file()
+                                            {
+                                                match crate::app::import::export_failure_csv(
+                                                    &p.to_string_lossy(),
+                                                    &o.failures,
+                                                ) {
+                                                    Ok(n) => app.toast(
+                                                        ToastKind::Success,
+                                                        format!("{}{n} {}", t("已导出 ", "Exported "), t("条失败记录", "failure records")),
+                                                    ),
+                                                    Err(e) => app.toast(
+                                                        ToastKind::Error,
+                                                        format!("{}{e}", t("导出失败：", "Export failed: ")),
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                                if o.path_repaired > 0
+                                    && app.import_report_view == Some(ImportReportView::Repairs)
+                                {
+                                    repairs_table(ui, &o.repairs);
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .button(t("导出修复列表 .csv", "Export repairs .csv"))
+                                            .clicked()
+                                        {
+                                            if let Some(p) = rfd::FileDialog::new()
+                                                .add_filter("CSV", &["csv"])
+                                                .set_file_name("路径修复列表.csv")
+                                                .save_file()
+                                            {
+                                                match crate::app::import::export_repair_csv(
+                                                    &p.to_string_lossy(),
+                                                    &o.repairs,
+                                                ) {
+                                                    Ok(n) => app.toast(
+                                                        ToastKind::Success,
+                                                        format!("{}{n} {}", t("已导出 ", "Exported "), t("条修复记录", "repair records")),
+                                                    ),
+                                                    Err(e) => app.toast(
+                                                        ToastKind::Error,
+                                                        format!("{}{e}", t("导出失败：", "Export failed: ")),
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                    });
                                 }
                             }
                             crate::app::state::ImportResult::Copy(o) => {
@@ -391,9 +564,43 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                                 };
                                 ui.label(RichText::new(msg).size(14.0).color(theme::KEEP));
                                 if !o.failures.is_empty() {
-                                    ui.label(RichText::new(t("失败列表（前3条）：", "Failures (first 3):")).size(12.0).color(theme::DELETE));
-                                    for f in o.failures.iter().take(3) {
-                                        ui.label(RichText::new(f).size(12.0).color(theme::TEXT_WEAK));
+                                    use crate::app::ui::app::ImportReportView;
+                                    ui.horizontal(|ui| {
+                                        if ui.button(t("查看失败列表", "View failure list")).clicked() {
+                                            app.import_report_view = match app.import_report_view {
+                                                Some(ImportReportView::Failures) => None,
+                                                _ => Some(ImportReportView::Failures),
+                                            };
+                                        }
+                                    });
+                                    if app.import_report_view == Some(ImportReportView::Failures) {
+                                        failures_table(ui, &o.failures, true);
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .button(t("导出失败列表 .csv", "Export failures .csv"))
+                                                .clicked()
+                                            {
+                                                if let Some(p) = rfd::FileDialog::new()
+                                                    .add_filter("CSV", &["csv"])
+                                                    .set_file_name("导入失败列表.csv")
+                                                    .save_file()
+                                                {
+                                                    match crate::app::import::export_failure_csv(
+                                                        &p.to_string_lossy(),
+                                                        &o.failures,
+                                                    ) {
+                                                        Ok(n) => app.toast(
+                                                            ToastKind::Success,
+                                                            format!("{}{n} {}", t("已导出 ", "Exported "), t("条失败记录", "failure records")),
+                                                        ),
+                                                        Err(e) => app.toast(
+                                                            ToastKind::Error,
+                                                            format!("{}{e}", t("导出失败：", "Export failed: ")),
+                                                        ),
+                                                    }
+                                                }
+                                            }
+                                        });
                                     }
                                 }
                             }
@@ -1145,7 +1352,7 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
         .fixed_size([620.0, 460.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            ui.label(RichText::new("导出").heading().color(theme::TEXT));
+            // 标题栏已显示「导出」，内容区不再重复标题（与设置面板同例）。
             ui.label(RichText::new(t("仅导出「保留」照片（未标记待删），不改动源文件与数据库。", "Exports only kept photos (not marked for deletion); never touches source files or the database."))
                 .size(13.0).color(theme::TEXT_SECONDARY));
             ui.separator();
@@ -1197,7 +1404,7 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 copy_clicked = true;
             }
             // 已完成一次导出：结果摘要 + 失败列表（保留到下次导出）。
-            if let Some(Ok(report)) = &app.export_copy_result {
+            if let Some(Ok(report)) = app.export_copy_result.clone() {
                 let summary = if report.cancelled {
                     match i18n::lang() {
                         i18n::Lang::Zh => format!("已取消：成功 {} 张 / 未完成 {} 张", report.copied, report.failed),
@@ -1211,10 +1418,41 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 };
                 ui.label(RichText::new(summary).size(12.0).color(theme::TEXT_SECONDARY));
                 if !report.failures.is_empty() {
-                    ui.label(RichText::new(t("失败列表：", "Failed files:")).size(12.0).color(theme::DELETE));
-                    egui::ScrollArea::vertical().max_height(72.0).show(ui, |ui| {
-                        for f in &report.failures {
-                            ui.label(RichText::new(f).size(11.0).color(theme::TEXT_WEAK));
+                    ui.label(
+                        RichText::new(format!(
+                            "{}（{}/{}）",
+                            t("失败列表", "Failed files"),
+                            report.failures.len(),
+                            report.total
+                        ))
+                        .size(12.0)
+                        .color(theme::DELETE),
+                    );
+                    failures_table(ui, &report.failures, true);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(t("导出失败列表 .csv", "Export failures .csv"))
+                            .clicked()
+                        {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("CSV", &["csv"])
+                                .set_file_name("导出失败列表.csv")
+                                .save_file()
+                            {
+                                match crate::app::import::export_failure_csv(
+                                    &p.to_string_lossy(),
+                                    &report.failures,
+                                ) {
+                                    Ok(n) => app.toast(
+                                        ToastKind::Success,
+                                        format!("{}{n} {}", t("已导出 ", "Exported "), t("条失败记录", "failure records")),
+                                    ),
+                                    Err(e) => app.toast(
+                                        ToastKind::Error,
+                                        format!("{}{e}", t("导出失败：", "Export failed: ")),
+                                    ),
+                                }
+                            }
                         }
                     });
                 }
@@ -2187,22 +2425,25 @@ fn confirm_dialog(app: &mut KakaApp, ctx: &egui::Context) {
 }
 
 fn render_toasts(app: &mut KakaApp, ctx: &egui::Context) {
-    let toasts = &app.toasts;
-    if toasts.is_empty() {
+    if app.toasts.is_empty() {
         return;
     }
+    // Newest three; right-click a toast to dismiss it immediately.
+    let shown: Vec<usize> = (0..app.toasts.len()).rev().take(3).collect();
+    let mut dismiss: Option<usize> = None;
     egui::Area::new("toasts".into())
         .anchor(Align2::RIGHT_TOP, [-16.0, 16.0])
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            for t in toasts.iter().rev().take(3) {
-                let bar = match t.kind {
+            for &i in &shown {
+                let toast = &app.toasts[i];
+                let bar = match toast.kind {
                     ToastKind::Info | ToastKind::Warning => theme::ACCENT,
                     ToastKind::Success => theme::KEEP,
                     ToastKind::Error => theme::DELETE,
                 };
-                let text = RichText::new(&t.text).size(14.0).color(theme::TEXT);
-                egui::Frame::default()
+                let text = RichText::new(&toast.text).size(14.0).color(theme::TEXT);
+                let frame = egui::Frame::default()
                     .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 0xf2))
                     .stroke(egui::Stroke::new(1.0, theme::BORDER_2))
                     .inner_margin(12.0)
@@ -2213,8 +2454,18 @@ fn render_toasts(app: &mut KakaApp, ctx: &egui::Context) {
                             ui.label(text);
                         });
                     });
+                let resp = frame
+                    .response
+                    .interact(egui::Sense::click())
+                    .on_hover_text(t("右键关闭", "Right-click to dismiss"));
+                if resp.secondary_clicked() {
+                    dismiss = Some(i);
+                }
             }
         });
+    if let Some(i) = dismiss {
+        app.toasts.remove(i);
+    }
 }
 
 fn dialog_frame() -> egui::Frame {

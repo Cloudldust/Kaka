@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 pub struct ExportOutcome {
     pub copied: usize,
     pub failed: usize,
-    pub failures: Vec<String>,
+    pub failures: Vec<crate::app::import::ImportFailure>,
     pub total: usize,
 }
 
@@ -136,6 +136,10 @@ pub fn export_kept_copy(
         ..Default::default()
     };
     // Map current_path -> rotation_override (only when writing rotation XMP).
+    let mut capture_times: HashMap<String, String> = HashMap::new();
+    for p in &kept {
+        capture_times.insert(p.current_path.clone(), p.capture_time.clone());
+    }
     let mut rotations: HashMap<String, i64> = HashMap::new();
     if write_rotation_xmp {
         for p in &kept {
@@ -177,7 +181,17 @@ pub fn export_kept_copy(
             }
         } else {
             outcome.failed += 1;
-            outcome.failures.push(src.display().to_string());
+            outcome.failures.push(crate::app::import::ImportFailure {
+                source_path: src.to_string_lossy().into_owned(),
+                target_path: dest.to_string_lossy().into_owned(),
+                reason_code: "COPY_FAILED".into(),
+                reason: crate::i18n::t("复制失败（源文件不可读或目标不可写）", "Copy failed (source unreadable or target unwritable)").into(),
+                file_size: std::fs::metadata(src).map(|m| m.len() as i64).unwrap_or(0),
+                capture_time: capture_times
+                    .get(&src.to_string_lossy().into_owned())
+                    .cloned()
+                    .unwrap_or_default(),
+            });
         }
         done += 1;
     }

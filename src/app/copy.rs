@@ -90,7 +90,7 @@ pub struct CopyOutcome {
     pub scanned: usize,
     pub total_size: u64,
     pub target_dir: String,
-    pub failures: Vec<String>,
+    pub failures: Vec<crate::app::import::ImportFailure>,
     /// 清空存储卡: whether the user asked to clear the source card after import.
     pub clear_card: bool,
     /// Source paths that were copied AND recorded in the DB — the only files
@@ -275,18 +275,34 @@ pub fn copy_mode_import(
                         Ok(None) => outcome.skipped_existing += 1,
                         Err(e) => {
                             outcome.failed += 1;
-                            outcome.failures.push(format!(
-                                "{}: {e}",
-                                jobs_arc[idx].item.path.display()
-                            ));
+                            outcome.failures.push(crate::app::import::ImportFailure {
+                                source_path: jobs_arc[idx]
+                                    .item
+                                    .path
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                target_path: jobs_arc[idx]
+                                    .target
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                reason_code: "INSERT_FAILED".into(),
+                                reason: e.to_string(),
+                                file_size: jobs_arc[idx].item.file_size,
+                                capture_time: jobs_arc[idx].capture_time.clone(),
+                            });
                         }
                     }
                 }
                 Err(e) => {
                     outcome.failed += 1;
-                    outcome
-                        .failures
-                        .push(format!("{}: {e}", jobs_arc[idx].item.path.display()));
+                    outcome.failures.push(crate::app::import::ImportFailure {
+                        source_path: jobs_arc[idx].item.path.to_string_lossy().into_owned(),
+                        target_path: jobs_arc[idx].target.to_string_lossy().into_owned(),
+                        reason_code: "COPY_FAILED".into(),
+                        reason: e.to_string(),
+                        file_size: jobs_arc[idx].item.file_size,
+                        capture_time: jobs_arc[idx].capture_time.clone(),
+                    });
                 }
             }
         }

@@ -22,8 +22,36 @@ pub struct ImportOutcome {
     pub path_repaired: usize,
     pub scanned: usize,
     pub folder: String,
-    pub failures: Vec<String>,
-    pub repairs: Vec<String>,
+    /// Per-file failure details (PRD 6.8).
+    pub failures: Vec<ImportFailure>,
+    /// Per-file path repairs (PRD 6.4 / 6.8).
+    pub repairs: Vec<PathRepair>,
+}
+
+/// One failed file with full detail (PRD 6.8).
+#[derive(Debug, Clone)]
+pub struct ImportFailure {
+    pub source_path: String,
+    /// Copy mode: the intended destination path; add mode: empty.
+    pub target_path: String,
+    /// Short stable reason code (e.g. COPY_FAILED / INSERT_FAILED).
+    pub reason_code: String,
+    /// Human-readable reason description.
+    pub reason: String,
+    pub file_size: i64,
+    /// 三要素捕获时间 (the capture time used for indexing/dedup).
+    pub capture_time: String,
+}
+
+/// One repaired library path (PRD 6.4 / 6.8).
+#[derive(Debug, Clone)]
+pub struct PathRepair {
+    pub old_path: String,
+    pub new_path: String,
+    pub original_filename: String,
+    pub capture_time: String,
+    /// When the repair was applied (local time).
+    pub repaired_at: String,
 }
 
 impl ImportOutcome {
@@ -190,10 +218,15 @@ pub fn add_mode_import_with_thumbs(
                         &folder_path,
                     )?;
                     outcome.path_repaired += 1;
-                    outcome.repairs.push(format!(
-                        "{} -> {}",
-                        found.current_path, current_path
-                    ));
+                    outcome.repairs.push(PathRepair {
+                        old_path: found.current_path.clone(),
+                        new_path: current_path.clone(),
+                        original_filename: photo.original_filename.clone(),
+                        capture_time: capture_time.clone(),
+                        repaired_at: chrono::Local::now()
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string(),
+                    });
                 }
                 continue;
             }
@@ -215,9 +248,14 @@ pub fn add_mode_import_with_thumbs(
             Ok(None) => outcome.skipped_existing += 1,
             Err(e) => {
                 outcome.failed += 1;
-                outcome
-                    .failures
-                    .push(format!("{}: {e}", item.path.display()));
+                outcome.failures.push(ImportFailure {
+                    source_path: item.path.to_string_lossy().into_owned(),
+                    target_path: String::new(),
+                    reason_code: "INSERT_FAILED".into(),
+                    reason: e.to_string(),
+                    file_size: item.file_size,
+                    capture_time,
+                });
             }
         }
     }
@@ -227,6 +265,58 @@ pub fn add_mode_import_with_thumbs(
 
 fn path_valid(p: &str) -> bool {
     Path::new(p).exists()
+}
+
+/// Quote a CSV field when it contains a separator, quote or newline.
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// PRD 6.8: write the import failure list as CSV (UTF-8 BOM + CRLF).
+/// Fields: 序号、源路径、目标路径、失败原因代码、失败原因中文描述、文件大小、
+/// 三要素捕获时间. Returns the row count.
+pub fn export_failure_csv(path: &str, failures: &[ImportFailure]) -> anyhow::Result<usize> {
+    let mut text = String::from("\u{feff}");
+    text.push_str("序号,源路径,目标路径,失败原因代码,失败原因描述,文件大小,三要素捕获时间\r\n");
+    for (i, f) in failures.iter().enumerate() {
+        text.push_str(&format!(
+            "{},{},{},{},{},{},{}\r\n",
+            i + 1,
+            csv_field(&f.source_path),
+            csv_field(&f.target_path),
+            csv_field(&f.reason_code),
+            csv_field(&f.reason),
+            f.file_size,
+            csv_field(&f.capture_time),
+        ));
+    }
+    std::fs::write(path, text)?;
+    Ok(failures.len())
+}
+
+/// PRD 6.8: write the path-repair list as CSV (UTF-8 BOM + CRLF).
+/// Fields: 序号、旧路径、新路径、原始文件名、三要素捕获时间、修复时间戳.
+/// Returns the row count.
+pub fn export_repair_csv(path: &str, repairs: &[PathRepair]) -> anyhow::Result<usize> {
+    let mut text = String::from("\u{feff}");
+    text.push_str("序号,旧路径,新路径,原始文件名,三要素捕获时间,修复时间戳\r\n");
+    for (i, r) in repairs.iter().enumerate() {
+        text.push_str(&format!(
+            "{},{},{},{},{},{}\r\n",
+            i + 1,
+            csv_field(&r.old_path),
+            csv_field(&r.new_path),
+            csv_field(&r.original_filename),
+            csv_field(&r.capture_time),
+            csv_field(&r.repaired_at),
+        ));
+    }
+    std::fs::write(path, text)?;
+    Ok(repairs.len())
 }
 
 /// Pre-scan verdict for one file (PRD 6.5 第三步 去重扫描).

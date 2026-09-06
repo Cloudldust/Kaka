@@ -121,6 +121,8 @@ pub struct KakaApp {
     pub import_scan_scroll_offset: f32,
     /// DEBUG: last logged grid layout signature (jitter diagnosis).
     pub import_scan_dbg_sig: (usize, i32, i32, i32, i32),
+    /// Expanded detail list of the import completion report (PRD 6.8).
+    pub import_report_view: Option<ImportReportView>,
 
     // Zoom (Z-key) view state (PRD 7.4). The pan anchor is stored as the image
     // point (fractions 0..1) shown at the viewport center, so it survives the
@@ -240,11 +242,14 @@ pub struct ExportCopyProgress {
 }
 
 /// Outcome of a finished copy export, shown in the export dialog.
+#[derive(Clone)]
 pub struct ExportCopyReport {
     pub copied: usize,
     pub failed: usize,
     pub cancelled: bool,
-    pub failures: Vec<String>,
+    /// Files attempted (copied + failed) for the failure-list header.
+    pub total: usize,
+    pub failures: Vec<crate::app::import::ImportFailure>,
 }
 
 /// Sort key of the import pre-scan grid (UI 5.1-4 工具栏).
@@ -265,6 +270,13 @@ pub enum ImportScanFilter {
 
 /// Cell size presets of the import pre-scan grid: S / M / L.
 pub const IMPORT_SCAN_CELL_SIZES: [f32; 3] = [100.0, 140.0, 180.0];
+
+/// Which detail list is expanded in the import completion report (PRD 6.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportReportView {
+    Failures,
+    Repairs,
+}
 
 pub struct ConfirmDialog {
     pub title: String,
@@ -326,6 +338,7 @@ impl KakaApp {
             import_scan_last_cell: 1,
             import_scan_scroll_offset: 0.0,
             import_scan_dbg_sig: (0, 0, 0, 0, 0),
+            import_report_view: None,
             zoom_active: false,
             zoom_center: (0.5, 0.5),
             zoom_scale_target: 1.0,
@@ -1181,6 +1194,7 @@ impl KakaApp {
 
         self.state.import_running = true;
         self.state.import_result = None;
+        self.import_report_view = None;
         self.state.import_progress = crate::app::state::ImportProgress {
             phase: "扫描".to_string(),
             done: 0,
@@ -1264,6 +1278,7 @@ impl KakaApp {
 
         self.state.import_running = true;
         self.state.import_result = None;
+        self.import_report_view = None;
         self.state.import_progress = crate::app::state::ImportProgress {
             phase: "准备".to_string(),
             done: resume_base,
@@ -1778,6 +1793,7 @@ impl KakaApp {
                         copied: out.copied,
                         failed: out.failed,
                         cancelled,
+                        total: out.total,
                         failures: out.failures.clone(),
                     };
                     let msg = if cancelled {

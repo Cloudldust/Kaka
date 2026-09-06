@@ -1116,3 +1116,66 @@ fn import_prescan_marks_new_exists_and_repair() {
     assert_eq!(items_b.len(), 1);
     assert_eq!(items_b[0].mark, PrescanMark::PathRepair);
 }
+
+#[test]
+fn import_report_csv_and_structured_repairs() {
+    use kaka::app::import::{export_failure_csv, export_repair_csv, ImportFailure, PathRepair};
+
+    let root = temp_root();
+
+    // CSV writers: BOM + CRLF + header + quoting of comma/quote fields.
+    let failures = vec![ImportFailure {
+        source_path: r#"a,DSC_1.JPG"#.into(),
+        target_path: r#"out"DSC_1.JPG"#.into(),
+        reason_code: "COPY_FAILED".into(),
+        reason: "磁盘已满".into(),
+        file_size: 123,
+        capture_time: "2026-01-01 10:00:00".into(),
+    }];
+    let csv = root.join("failures.csv");
+    let n = export_failure_csv(csv.to_string_lossy().as_ref(), &failures).unwrap();
+    assert_eq!(n, 1);
+    let text = std::fs::read_to_string(&csv).unwrap();
+    assert!(text.starts_with('\u{feff}'));
+    assert!(text.contains("\r\n"));
+    assert!(text.contains("序号,源路径,目标路径,失败原因代码,失败原因描述,文件大小,三要素捕获时间"));
+    assert!(text.contains(r#""a,DSC_1.JPG""#), "comma field must be quoted: {text}");
+
+    let repairs = vec![PathRepair {
+        old_path: "old".into(),
+        new_path: "new".into(),
+        original_filename: "DSC_0001.JPG".into(),
+        capture_time: "2026-01-01 10:00:00".into(),
+        repaired_at: "2026-09-06 19:00:00".into(),
+    }];
+    let csv2 = root.join("repairs.csv");
+    export_repair_csv(csv2.to_string_lossy().as_ref(), &repairs).unwrap();
+    let text2 = std::fs::read_to_string(&csv2).unwrap();
+    assert!(text2.contains("序号,旧路径,新路径,原始文件名,三要素捕获时间,修复时间戳"));
+    assert!(text2.contains("old,new,DSC_0001.JPG"));
+
+    // End-to-end: re-importing a moved file produces one structured repair
+    // with the old/new paths filled in.
+    let db_path = root.join("repair.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+    let dir_a = root.join("ra");
+    let dir_b = root.join("rb");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    make_jpeg(&dir_a.join("DSC_0001.JPG"), [10, 20, 30]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &dir_a, true, true, &mut prog, None).unwrap();
+    std::fs::rename(dir_a.join("DSC_0001.JPG"), dir_b.join("DSC_0001.JPG")).unwrap();
+
+    let outcome = import::add_mode_import(&mut db, &root, true, true, &mut prog, None).unwrap();
+    assert_eq!(outcome.path_repaired, 1);
+    assert_eq!(outcome.added, 0);
+    let r = &outcome.repairs[0];
+    assert!(r.old_path.ends_with("DSC_0001.JPG"));
+    assert!(r.new_path.ends_with("DSC_0001.JPG"));
+    assert_ne!(r.old_path, r.new_path);
+    assert_eq!(r.original_filename, "DSC_0001.JPG");
+    assert!(!r.repaired_at.is_empty());
+}
