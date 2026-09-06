@@ -703,6 +703,40 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                             .spawn();
                     }
                 });
+                // 缓存重建 (PRD 9.6): regenerate every thumb + preview from the
+                // DB on a cancellable background thread.
+                ui.horizontal(|ui| {
+                    if app.cache_rebuilding {
+                        let done = app.cache_rebuild_done.load(Ordering::SeqCst);
+                        let total = app.cache_rebuild_total.load(Ordering::SeqCst);
+                        ui.label(
+                            RichText::new(format!("{} ({done}/{total})", t("重建中", "Rebuilding")))
+                                .size(13.0)
+                                .color(theme::ACCENT),
+                        );
+                        if ui.button(t("取消重建", "Cancel rebuild")).clicked() {
+                            app.cache_rebuild_cancel.store(true, Ordering::SeqCst);
+                        }
+                    } else if ui
+                        .button(t("重建全部缩略图与预览图", "Rebuild all thumbnails & previews"))
+                        .on_hover_text(
+                            t("逐张重新解码并覆盖缩略图与预览图缓存（耗时操作）",
+                              "Re-decode every photo and overwrite its thumbnail & preview caches (slow)"),
+                        )
+                        .clicked()
+                    {
+                        app.confirm = Some(ConfirmDialog {
+                            title: t("重建全部缓存", "Rebuild all caches").into(),
+                            text: match i18n::lang() {
+                                i18n::Lang::Zh => "将遍历数据库中的全部照片，逐张重新生成并覆盖缩略图与预览图缓存。\n这是耗时操作，期间可随时取消（已重建部分保留）。\n确定开始？".to_string(),
+                                i18n::Lang::En => "Every photo in the database will be re-decoded and its thumbnail & preview caches overwritten.\nThis is a slow operation and can be cancelled at any time (finished photos are kept).\nStart now?".to_string(),
+                            },
+                            confirm_label: t("开始重建", "Start rebuild").into(),
+                            danger: false,
+                            on_confirm: Box::new(|app| app.start_cache_rebuild()),
+                        });
+                    }
+                });
 
                 section(ui, t("关于", "About"));
                 ui.label(

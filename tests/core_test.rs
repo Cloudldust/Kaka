@@ -928,3 +928,71 @@ fn cache_migration_copies_tree() {
     std::fs::remove_dir_all(&old).unwrap();
     assert!(!Path::new(&old).exists());
 }
+
+#[test]
+fn cache_rebuild_regenerates_missing_and_counts_failures() {
+    let root = temp_root();
+    let db_path = root.join("rebuild.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("import");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [10, 20, 30]);
+    make_jpeg(&src.join("DSC_0002.JPG"), [40, 50, 60]);
+
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog).unwrap();
+    let items = db::photos::list_items_in_folder(
+        &db,
+        &src.to_string_lossy(),
+        kaka::model::SortOrder::CaptureTimeAsc,
+    )
+    .unwrap();
+    assert_eq!(items.len(), 2);
+    let hash = |p: &kaka::model::PhotoListItem| p.thumb_hash.clone().unwrap();
+
+    // Caches exist after generation, then wipe them to simulate a broken cache.
+    for p in &items {
+        assert!(thumbnails::generate_caches(
+            Path::new(&p.current_path),
+            p.thumb_hash.as_ref().unwrap(),
+            1.0
+        )
+        .unwrap());
+    }
+    for p in &items {
+        std::fs::remove_file(thumbnails::thumb_path(&hash(p), 1.0)).unwrap();
+        std::fs::remove_file(thumbnails::preview_path(&hash(p))).unwrap();
+    }
+
+    // Rebuild regenerates everything and reports progress per photo.
+    let mut progress: Vec<(usize, usize)> = Vec::new();
+    let (done, failed) = kaka::app::cache_rebuild::rebuild_all_caches(&db, 1.0, || false, |d, t| {
+        progress.push((d, t));
+    });
+    assert_eq!(done, 2);
+    assert_eq!(failed, 0);
+    assert_eq!(progress.last(), Some(&(2, 2)));
+    for p in &items {
+        assert!(thumbnails::thumb_path(&hash(p), 1.0).exists());
+        assert!(thumbnails::preview_path(&hash(p)).exists());
+    }
+
+    // A photo whose source file vanished counts as a failure, not a crash.
+    std::fs::remove_file(&items[0].current_path).unwrap();
+    std::fs::remove_file(thumbnails::thumb_path(&hash(&items[0]), 1.0)).unwrap();
+    let (done, failed) =
+        kaka::app::cache_rebuild::rebuild_all_caches(&db, 1.0, || false, |_, _| {});
+    assert_eq!(done, 2);
+    assert_eq!(failed, 1);
+
+    // Cancellation before the first photo regenerates nothing (done photos stay).
+    std::fs::remove_file(thumbnails::thumb_path(&hash(&items[1]), 1.0)).unwrap();
+    std::fs::remove_file(thumbnails::preview_path(&hash(&items[1]))).unwrap();
+    let (done, _failed) = kaka::app::cache_rebuild::rebuild_all_caches(&db, 1.0, || true, |_, _| {});
+    assert_eq!(done, 0);
+    assert!(!thumbnails::thumb_path(&hash(&items[1]), 1.0).exists());
+    assert!(!thumbnails::preview_path(&hash(&items[1])).exists());
+}

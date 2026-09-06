@@ -266,6 +266,27 @@ pub fn list_items_in_folder(
     Ok(out)
 }
 
+/// Every photo in the library regardless of folder, as
+/// (id, current_path, thumb_hash, file_size, capture_time) — used by the
+/// full cache rebuild (PRD 9.6).
+pub fn list_all_basic(
+    db: &Db,
+) -> anyhow::Result<Vec<(i64, String, Option<String>, i64, String)>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT id, current_path, thumb_hash, file_size, capture_time FROM photos ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// List photo list items in a folder matching an advanced filter (PRD 7.8).
 /// SQL conditions are applied for the structured fields; format + missing-file
 /// checks are applied in memory (they need filename/disk inspection).

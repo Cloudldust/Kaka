@@ -179,6 +179,16 @@ pub struct KakaApp {
     /// Cache-root migration in flight (PRD 9.2): background copy old → new.
     pub cache_migrating: bool,
     pub cache_migrate_rx: Option<Receiver<anyhow::Result<usize>>>,
+
+    /// Full cache rebuild in flight (PRD 9.6): regenerate every thumbnail +
+    /// preview from the DB on a background thread, cancellable at any time.
+    pub cache_rebuilding: bool,
+    /// (processed, failed, cancelled) sent when the thread finishes.
+    pub cache_rebuild_rx: Option<Receiver<anyhow::Result<(usize, usize, bool)>>>,
+    pub cache_rebuild_cancel: Arc<AtomicBool>,
+    /// Live progress for the settings button label 重建中 (x/N).
+    pub cache_rebuild_done: Arc<AtomicUsize>,
+    pub cache_rebuild_total: Arc<AtomicUsize>,
 }
 
 pub struct ConfirmDialog {
@@ -263,6 +273,11 @@ impl KakaApp {
             kb_error: None,
             cache_migrating: false,
             cache_migrate_rx: None,
+            cache_rebuilding: false,
+            cache_rebuild_rx: None,
+            cache_rebuild_cancel: Arc::new(AtomicBool::new(false)),
+            cache_rebuild_done: Arc::new(AtomicUsize::new(0)),
+            cache_rebuild_total: Arc::new(AtomicUsize::new(0)),
         };
         if app.startup.first_run {
             app.toast(
@@ -1378,6 +1393,16 @@ impl KakaApp {
         if self.cache_migrating {
             return;
         }
+        if self.cache_rebuilding {
+            // A rebuild writing into the old tree would lose its output when
+            // the migration deletes it — don't overlap them.
+            self.toast(
+                ToastKind::Warning,
+                t("正在重建缓存，请等重建结束（或取消）后再迁移缓存路径",
+                  "A cache rebuild is running — finish or cancel it before migrating the cache path"),
+            );
+            return;
+        }
         self.cache_migrating = true;
         self.toast(
             ToastKind::Info,
@@ -1416,6 +1441,89 @@ impl KakaApp {
                 Err(e) => self.toast(
                     ToastKind::Error,
                     format!("{}{e}", t("缓存迁移失败：", "Cache migration failed: ")),
+                ),
+            }
+        }
+    }
+
+    /// Full cache rebuild (PRD 9.6): walk every photo row in the DB and
+    /// regenerate its thumbnail + preview caches on a background thread,
+    /// overwriting existing files. Cancellable; live progress is shared via
+    /// atomics so the settings button can show 重建中 (x/N) without blocking.
+    pub fn start_cache_rebuild(&mut self) {
+        if self.cache_rebuilding || self.cache_migrating {
+            return;
+        }
+        self.cache_rebuilding = true;
+        self.cache_rebuild_cancel = Arc::new(AtomicBool::new(false));
+        self.cache_rebuild_done.store(0, Ordering::SeqCst);
+        self.cache_rebuild_total.store(0, Ordering::SeqCst);
+        let (tx, rx) = channel();
+        self.cache_rebuild_rx = Some(rx);
+        let cancel = Arc::clone(&self.cache_rebuild_cancel);
+        let done_counter = Arc::clone(&self.cache_rebuild_done);
+        let total_counter = Arc::clone(&self.cache_rebuild_total);
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<(usize, usize, bool)> {
+                let db = Db::open_default()?;
+                let (done, failed) = crate::app::cache_rebuild::rebuild_all_caches(
+                    &db,
+                    1.0,
+                    || cancel.load(Ordering::SeqCst),
+                    |done, total| {
+                        done_counter.store(done, Ordering::SeqCst);
+                        total_counter.store(total, Ordering::SeqCst);
+                    },
+                );
+                Ok((done, failed, cancel.load(Ordering::SeqCst)))
+            })();
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Non-blocking drain of rebuild results.
+    fn poll_cache_rebuild(&mut self) {
+        let Some(rx) = &self.cache_rebuild_rx else {
+            return;
+        };
+        if let Ok(res) = rx.try_recv() {
+            self.cache_rebuild_rx = None;
+            self.cache_rebuilding = false;
+            match res {
+                Ok((done, failed, cancelled)) => {
+                    if cancelled {
+                        let msg = match i18n::lang() {
+                            i18n::Lang::Zh => format!("重建已取消：已完成 {done} 张"),
+                            i18n::Lang::En => format!("Rebuild cancelled: {done} photos done"),
+                        };
+                        self.toast(ToastKind::Warning, msg);
+                    } else {
+                        let msg = match i18n::lang() {
+                            i18n::Lang::Zh => {
+                                if failed > 0 {
+                                    format!("重建完成，共 {done} 张，失败 {failed} 张（详情见日志）")
+                                } else {
+                                    format!("重建完成，共 {done} 张")
+                                }
+                            }
+                            i18n::Lang::En => {
+                                if failed > 0 {
+                                    format!("Rebuild finished: {done} photos, {failed} failed (see log)")
+                                } else {
+                                    format!("Rebuild finished: {done} photos")
+                                }
+                            }
+                        };
+                        if failed == 0 {
+                            self.toast(ToastKind::Success, msg);
+                        } else {
+                            self.toast(ToastKind::Warning, msg);
+                        }
+                    }
+                }
+                Err(e) => self.toast(
+                    ToastKind::Error,
+                    format!("{}{e}", t("缓存重建失败：", "Cache rebuild failed: ")),
                 ),
             }
         }
@@ -1509,6 +1617,7 @@ impl eframe::App for KakaApp {
         self.poll_zoom(&ctx);
         self.poll_cache_clean();
         self.poll_cache_migrate();
+        self.poll_cache_rebuild();
         self.handle_input(&ctx);
 
         // Enqueue missing thumb caches once per workspace.

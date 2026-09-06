@@ -1,6 +1,7 @@
 //! Application logic layer: import engine, state, caches, shortcuts and UI.
 
 pub mod card;
+pub mod cache_rebuild;
 pub mod copy;
 pub mod export;
 pub mod import;
