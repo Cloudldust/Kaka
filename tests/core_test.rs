@@ -147,6 +147,8 @@ fn add_mode_import_dedup_and_insert() {
         iso: None,
         aperture: None,
         shutter_speed: None,
+        aperture_num: None,
+        shutter_num: None,
         focal_length: None,
         camera_model: None,
         lens_model: None,
@@ -1287,4 +1289,191 @@ fn workspace_remove_item_navigation() {
     ws.remove_item(1);
     assert!(ws.items.is_empty());
     assert_eq!(ws.current_index, 0);
+}
+
+#[test]
+fn schema_v1_migrates_to_v2_with_backfill() {
+    let root = temp_root();
+    let db_path = root.join("kaka.db");
+    let mut db = Db::open(&db_path).unwrap();
+
+    // Hand-build a version-1 database (photos without the numeric columns).
+    db.conn
+        .execute_batch(
+            r#"
+            CREATE TABLE meta (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                schema_version  INTEGER NOT NULL DEFAULT 1,
+                app_version     TEXT,
+                created_at      TEXT DEFAULT (datetime('now')),
+                last_migrated_at TEXT
+            );
+            CREATE TABLE photos (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_filename     TEXT NOT NULL,
+                file_size             INTEGER NOT NULL,
+                capture_time          TEXT NOT NULL,
+                current_path          TEXT NOT NULL,
+                folder_path           TEXT NOT NULL,
+                status                INTEGER DEFAULT 0,
+                thumb_hash            TEXT,
+                decode_failed         INTEGER DEFAULT 0,
+                preview_only          INTEGER DEFAULT 0,
+                rotation_override     INTEGER DEFAULT 0,
+                exif_orientation      INTEGER DEFAULT 1,
+                pair_group_id         INTEGER,
+                iso                   INTEGER,
+                aperture              TEXT,
+                shutter_speed         TEXT,
+                focal_length          INTEGER,
+                camera_model          TEXT,
+                lens_model            TEXT,
+                capture_time_source   TEXT DEFAULT 'exif_original',
+                import_time           TEXT DEFAULT (datetime('now')),
+                last_access_time      TEXT DEFAULT (datetime('now')),
+                marked_delete_time    TEXT,
+                marked_review_time    TEXT
+            );
+            INSERT INTO meta (id, schema_version, app_version) VALUES (1, 1, 'test');
+            INSERT INTO photos (original_filename, file_size, capture_time, current_path,
+                                folder_path, aperture, shutter_speed)
+                VALUES ('A.JPG', 1, '2026-01-01 10:00:00', 'x/A.JPG', 'x', 'f/5.6', '1/200s');
+            INSERT INTO photos (original_filename, file_size, capture_time, current_path,
+                                folder_path, aperture, shutter_speed)
+                VALUES ('B.JPG', 2, '2026-01-01 10:00:01', 'x/B.JPG', 'x', 'f/8', '30s');
+            INSERT INTO photos (original_filename, file_size, capture_time, current_path,
+                                folder_path)
+                VALUES ('C.JPG', 3, '2026-01-01 10:00:02', 'x/C.JPG', 'x');
+        "#,
+    )
+    .unwrap();
+
+    kaka::db::schema::migrate(&mut db).unwrap();
+
+    // Version bumped, backup created, columns exist with backfilled values.
+    assert_eq!(db.schema_version().unwrap(), 2);
+    assert!(db_path.with_file_name("kaka.db.v1.bak").exists());
+    let rows: Vec<(Option<f64>, Option<f64>)> = db
+        .conn
+        .prepare("SELECT aperture_num, shutter_num FROM photos ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let (a, s) = rows[0];
+    assert!((a.unwrap() - 5.6).abs() < 1e-9);
+    assert!((s.unwrap() - 0.005).abs() < 1e-9);
+    let (a, s) = rows[1];
+    assert_eq!(a.unwrap(), 8.0);
+    assert_eq!(s.unwrap(), 30.0);
+    assert!(rows[2].0.is_none() && rows[2].1.is_none(), "no strings → NULL");
+
+    // The numeric range predicate works on the backfilled data.
+    let n: i64 = db
+        .conn
+        .query_row(
+            "SELECT count(*) FROM photos WHERE aperture_num >= 4 AND aperture_num <= 8",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+}
+
+#[test]
+fn filter_aperture_shutter_ranges() {
+    use kaka::app::import; // re-exported helpers not needed; keeps imports tidy
+    use kaka::model::{Filter, Photo, SortOrder};
+
+    let root = temp_root();
+    let db_path = root.join("range.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let folder = root.join("photos").to_string_lossy().into_owned();
+    let mk = |name: &str, f: f64, s: f64| Photo {
+        id: 0,
+        original_filename: name.into(),
+        file_size: 1,
+        capture_time: "2026-01-01 10:00:00".into(),
+        current_path: format!("{folder}/{name}"),
+        folder_path: folder.clone(),
+        status: kaka::model::Status::Untreated,
+        thumb_hash: None,
+        decode_failed: false,
+        preview_only: false,
+        rotation_override: 0,
+        exif_orientation: 1,
+        pair_group_id: None,
+        iso: None,
+        aperture: Some(format!("f/{}", f)),
+        shutter_speed: Some("1/500s".into()),
+        aperture_num: Some(f),
+        shutter_num: Some(s),
+        focal_length: None,
+        camera_model: None,
+        lens_model: None,
+        capture_time_source: "exif_original".into(),
+        import_time: String::new(),
+        last_access_time: String::new(),
+        marked_delete_time: None,
+        marked_review_time: None,
+    };
+    db::photos::insert_photo(&db, &mk("A.JPG", 5.6, 0.002)).unwrap();
+    db::photos::insert_photo(&db, &mk("B.JPG", 11.0, 0.016667)).unwrap();
+    db::photos::insert_photo(&db, &mk("C.JPG", 1.8, 30.0)).unwrap();
+    // A photo without numeric values: range filters must exclude it.
+    let mut no_num = mk("D.JPG", 0.0, 0.0);
+    no_num.aperture = None;
+    no_num.shutter_speed = None;
+    no_num.aperture_num = None;
+    no_num.shutter_num = None;
+    db::photos::insert_photo(&db, &no_num).unwrap();
+
+    let ids = |filter: Filter| -> Vec<String> {
+        db::photos::list_items_filtered(&db, &folder, SortOrder::FilenameAsc, &filter)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.original_filename)
+            .collect()
+    };
+
+    // Aperture range 4..=8 → only A.
+    let out = ids(Filter {
+        aperture_min: Some(4.0),
+        aperture_max: Some(8.0),
+        ..Default::default()
+    });
+    assert_eq!(out, vec!["A.JPG".to_string()]);
+
+    // Fastest shutter ≤ 1/125 (0.008s) → only A.
+    let out = ids(Filter {
+        shutter_max: Some(0.008),
+        ..Default::default()
+    });
+    assert_eq!(out, vec!["A.JPG".to_string()]);
+
+    // Slowest shutter ≥ 1s → only C.
+    let out = ids(Filter {
+        shutter_min: Some(1.0),
+        ..Default::default()
+    });
+    assert_eq!(out, vec!["C.JPG".to_string()]);
+
+    // Combined: aperture 4..=8 AND shutter ≥ 1s → impossible → empty.
+    let out = ids(Filter {
+        aperture_min: Some(4.0),
+        aperture_max: Some(8.0),
+        shutter_min: Some(1.0),
+        ..Default::default()
+    });
+    assert!(out.is_empty());
+
+    // No filter → everything (including the NULL-numeric photo).
+    let out = ids(Filter::default());
+    assert_eq!(out.len(), 4);
+
+    let _ = import::add_mode_import; // silence unused-import churn if any
 }

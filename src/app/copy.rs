@@ -397,6 +397,8 @@ fn build_photo(
         rotation_override: 0,
         exif_orientation: job.ex.orientation.unwrap_or(1),
         pair_group_id: None,
+        aperture_num: job.ex.aperture.as_deref().and_then(exif::parse_aperture_num),
+        shutter_num: job.ex.shutter_speed.as_deref().and_then(exif::parse_shutter_num),
         iso: job.ex.iso,
         aperture: job.ex.aperture.clone(),
         shutter_speed: job.ex.shutter_speed.clone(),

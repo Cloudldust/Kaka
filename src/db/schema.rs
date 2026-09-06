@@ -74,11 +74,29 @@ pub fn migrate(db: &mut Db) -> anyhow::Result<()> {
 }
 
 /// Apply the migration that bumps the schema from `ver-1` to `ver`.
-/// Version 1 is the initial schema; there are no earlier migrations yet.
-fn run_migration(_conn: &Connection, ver: i64) -> anyhow::Result<()> {
+/// Version 1 is the initial schema.
+fn run_migration(conn: &Connection, ver: i64) -> anyhow::Result<()> {
     match ver {
-        // Example future migration:
-        // 2 => { conn.execute_batch("ALTER TABLE photos ADD COLUMN foo TEXT;")?; }
+        // 1 -> 2 (PRD 7.8 光圈/快门范围): numeric aperture/shutter columns,
+        // backfilled from the existing display strings ("f/5.6", "1/200s", "2s").
+        2 => {
+            conn.execute_batch(
+                "ALTER TABLE photos ADD COLUMN aperture_num REAL;
+                 ALTER TABLE photos ADD COLUMN shutter_num REAL;
+                 UPDATE photos
+                    SET aperture_num = CAST(substr(aperture, 3) AS REAL)
+                  WHERE aperture IS NOT NULL AND aperture LIKE 'f/%';
+                 UPDATE photos
+                    SET shutter_num = CASE
+                      WHEN shutter_speed LIKE '%/%' THEN
+                        CAST(substr(shutter_speed, 1, instr(shutter_speed, '/') - 1) AS REAL) /
+                        CAST(replace(substr(shutter_speed, instr(shutter_speed, '/') + 1), 's', '') AS REAL)
+                      ELSE CAST(replace(shutter_speed, 's', '') AS REAL)
+                    END
+                  WHERE shutter_speed IS NOT NULL AND shutter_speed != '';",
+            )?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -230,6 +248,8 @@ CREATE TABLE IF NOT EXISTS photos (
     iso                   INTEGER,
     aperture              TEXT,
     shutter_speed         TEXT,
+    aperture_num          REAL,
+    shutter_num           REAL,
     focal_length          INTEGER,
     camera_model          TEXT,
     lens_model            TEXT,

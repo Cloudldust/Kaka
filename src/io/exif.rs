@@ -121,6 +121,29 @@ fn normalize_datetime(s: &str) -> Option<String> {
     Some(format!("{year}-{month}-{day} {time}"))
 }
 
+/// Parse the numeric f-value from the stored aperture string ("f/5.6", "f/8").
+pub fn parse_aperture_num(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let s = s.strip_prefix("f/").unwrap_or(s);
+    let v: f64 = s.parse().ok()?;
+    (v > 0.0).then_some(v)
+}
+
+/// Parse the exposure seconds from the stored shutter string
+/// ("1/200s" -> 0.005, "2s" -> 2.0).
+pub fn parse_shutter_num(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let s = s.strip_suffix('s').unwrap_or(s);
+    if let Some((num, den)) = s.split_once('/') {
+        let n: f64 = num.trim().parse().ok()?;
+        let d: f64 = den.trim().parse().ok()?;
+        (n > 0.0 && d > 0.0).then_some(n / d)
+    } else {
+        let v: f64 = s.parse().ok()?;
+        (v > 0.0).then_some(v)
+    }
+}
+
 fn short_value(f: &exif::Field) -> Option<i64> {
     match &f.value {
         Value::Short(v) => v.first().map(|&x| x as i64),
@@ -512,6 +535,17 @@ mod tests {
         assert_eq!(pixel_dims(&p), Some((8256, 5504)));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_aperture_and_shutter_strings() {
+        assert_eq!(parse_aperture_num("f/5.6"), Some(5.6));
+        assert_eq!(parse_aperture_num("f/8"), Some(8.0));
+        assert_eq!(parse_aperture_num("junk"), None);
+        assert!((parse_shutter_num("1/200s").unwrap() - 0.005).abs() < 1e-9);
+        assert_eq!(parse_shutter_num("2s"), Some(2.0));
+        assert_eq!(parse_shutter_num("1/60s").unwrap(), 1.0 / 60.0);
+        assert_eq!(parse_shutter_num("garbage"), None);
     }
 
     #[test]

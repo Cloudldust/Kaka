@@ -26,6 +26,8 @@ fn map_photo(r: &Row) -> rusqlite::Result<Photo> {
         iso: r.get("iso")?,
         aperture: r.get("aperture")?,
         shutter_speed: r.get("shutter_speed")?,
+        aperture_num: r.get("aperture_num")?,
+        shutter_num: r.get("shutter_num")?,
         focal_length: r.get("focal_length")?,
         camera_model: r.get("camera_model")?,
         lens_model: r.get("lens_model")?,
@@ -69,11 +71,11 @@ pub fn insert_photo(db: &Db, p: &Photo) -> anyhow::Result<Option<i64>> {
             "INSERT INTO photos
              (original_filename, file_size, capture_time, current_path, folder_path,
               status, thumb_hash, decode_failed, preview_only, rotation_override,
-              exif_orientation, pair_group_id, iso, aperture, shutter_speed, focal_length,
-              camera_model, lens_model, capture_time_source, import_time, last_access_time,
-              marked_delete_time, marked_review_time)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
-                     datetime('now'), datetime('now'), ?20, ?21)
+              exif_orientation, pair_group_id, iso, aperture, shutter_speed, aperture_num,
+              shutter_num, focal_length, camera_model, lens_model, capture_time_source,
+              import_time, last_access_time, marked_delete_time, marked_review_time)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
+                     ?21, datetime('now'), datetime('now'), ?22, ?23)
              ON CONFLICT(original_filename, file_size, capture_time) DO NOTHING",
             params![
                 p.original_filename,
@@ -91,6 +93,8 @@ pub fn insert_photo(db: &Db, p: &Photo) -> anyhow::Result<Option<i64>> {
                 p.iso,
                 p.aperture,
                 p.shutter_speed,
+                p.aperture_num,
+                p.shutter_num,
                 p.focal_length,
                 p.camera_model,
                 p.lens_model,
@@ -331,6 +335,24 @@ pub fn list_items_filtered(
     }
     if let Some(mx) = filter.focal_max {
         sql.push_str(" AND focal_length <= ?");
+        params.push(mx.into());
+    }
+    // Numeric aperture/shutter ranges (PRD 7.8): rows without a parsed value
+    // (NULL) never match, which is the desired behavior for range filters.
+    if let Some(mn) = filter.aperture_min {
+        sql.push_str(" AND aperture_num >= ?");
+        params.push(mn.into());
+    }
+    if let Some(mx) = filter.aperture_max {
+        sql.push_str(" AND aperture_num <= ?");
+        params.push(mx.into());
+    }
+    if let Some(mn) = filter.shutter_min {
+        sql.push_str(" AND shutter_num >= ?");
+        params.push(mn.into());
+    }
+    if let Some(mx) = filter.shutter_max {
+        sql.push_str(" AND shutter_num <= ?");
         params.push(mx.into());
     }
     if let Some(d) = &filter.date_from {

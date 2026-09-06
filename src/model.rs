@@ -127,6 +127,10 @@ pub struct Photo {
     pub iso: Option<i64>,
     pub aperture: Option<String>,
     pub shutter_speed: Option<String>,
+    /// Numeric f-value parsed from `aperture` (PRD 7.8 范围过滤), NULL on fail.
+    pub aperture_num: Option<f64>,
+    /// Numeric exposure seconds parsed from `shutter_speed`.
+    pub shutter_num: Option<f64>,
     pub focal_length: Option<i64>,
     pub camera_model: Option<String>,
     pub lens_model: Option<String>,
@@ -211,6 +215,12 @@ pub struct Filter {
     pub iso_max: Option<i64>,
     pub focal_min: Option<i64>,
     pub focal_max: Option<i64>,
+    /// Numeric f-value range (photos without a numeric value are excluded).
+    pub aperture_min: Option<f64>,
+    pub aperture_max: Option<f64>,
+    /// Exposure-seconds range: min = 最快, max = 最慢.
+    pub shutter_min: Option<f64>,
+    pub shutter_max: Option<f64>,
     /// Date range (inclusive) as YYYY-MM-DD; None = no bound.
     pub date_from: Option<String>,
     pub date_to: Option<String>,
@@ -232,6 +242,10 @@ impl Filter {
             || self.iso_max.is_some()
             || self.focal_min.is_some()
             || self.focal_max.is_some()
+            || self.aperture_min.is_some()
+            || self.aperture_max.is_some()
+            || self.shutter_min.is_some()
+            || self.shutter_max.is_some()
             || self.date_from.is_some()
             || self.date_to.is_some()
             || !self.formats.is_empty()

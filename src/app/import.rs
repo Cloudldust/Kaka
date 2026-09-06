@@ -185,6 +185,8 @@ pub fn add_mode_import_with_thumbs(
             rotation_override: 0,
             exif_orientation: ex.orientation.unwrap_or(1),
             pair_group_id: None,
+            aperture_num: ex.aperture.as_deref().and_then(exif::parse_aperture_num),
+            shutter_num: ex.shutter_speed.as_deref().and_then(exif::parse_shutter_num),
             iso: ex.iso,
             aperture: ex.aperture,
             shutter_speed: ex.shutter_speed,

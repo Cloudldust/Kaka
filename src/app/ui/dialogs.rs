@@ -1201,6 +1201,103 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     }
                 });
 
+                // 光圈范围 (PRD 7.8): numeric f-value min/max.
+                section_heading(ui, t("光圈范围 (f 值)", "Aperture range (f)"));
+                ui.horizontal(|ui| {
+                    let mut mn = app.filter_draft.aperture_min.unwrap_or(1.0);
+                    let mut mx = app.filter_draft.aperture_max.unwrap_or(32.0);
+                    ui.label(RichText::new("min").color(theme::TEXT_WEAK));
+                    if ui
+                        .add(egui::DragValue::new(&mut mn).range(0.1..=128.0).speed(0.1).suffix(" f"))
+                        .changed()
+                    {
+                        app.filter_draft.aperture_min = Some(mn);
+                    }
+                    ui.label(RichText::new("max").color(theme::TEXT_WEAK));
+                    if ui
+                        .add(egui::DragValue::new(&mut mx).range(0.1..=128.0).speed(0.1).suffix(" f"))
+                        .changed()
+                    {
+                        app.filter_draft.aperture_max = Some(mx);
+                    }
+                    if ui.button(t("清除", "Clear")).clicked() {
+                        app.filter_draft.aperture_min = None;
+                        app.filter_draft.aperture_max = None;
+                    }
+                });
+
+                // 快门范围 (PRD 7.8): 最快/最慢，秒数手输 + 预设档位 1/1000…1s。
+                section_heading(ui, t("快门范围", "Shutter range"));
+                ui.horizontal(|ui| {
+                    // Preset stops from 1/1000s to 1s (seconds).
+                    const PRESETS: [f64; 11] = [
+                        0.001, 0.002, 0.004, 0.008, 0.016667, 0.033333, 0.066667, 0.125, 0.25,
+                        0.5, 1.0,
+                    ];
+                    let label = |sec: f64| -> String {
+                        if sec >= 1.0 {
+                            format!("{}s", sec)
+                        } else {
+                            format!("1/{}s", (1.0 / sec).round() as i64)
+                        }
+                    };
+                    ui.label(RichText::new(t("最快", "Fastest")).size(12.0).color(theme::TEXT_WEAK));
+                    egui::ComboBox::from_id_salt("shutter_min_preset")
+                        .width(90.0)
+                        .selected_text(
+                            app.filter_draft
+                                .shutter_min
+                                .map(|v| label(v))
+                                .unwrap_or_else(|| t("预设", "Preset").to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for p in PRESETS {
+                                ui.selectable_value(
+                                    &mut app.filter_draft.shutter_min,
+                                    Some(p),
+                                    label(p),
+                                );
+                            }
+                        });
+                    let mut mn = app.filter_draft.shutter_min.unwrap_or(0.001);
+                    if ui
+                        .add(egui::DragValue::new(&mut mn).range(0.0001..=60.0).speed(0.05).suffix("s"))
+                        .changed()
+                    {
+                        app.filter_draft.shutter_min = Some(mn);
+                    }
+                    ui.separator();
+                    ui.label(RichText::new(t("最慢", "Slowest")).size(12.0).color(theme::TEXT_WEAK));
+                    egui::ComboBox::from_id_salt("shutter_max_preset")
+                        .width(90.0)
+                        .selected_text(
+                            app.filter_draft
+                                .shutter_max
+                                .map(|v| label(v))
+                                .unwrap_or_else(|| t("预设", "Preset").to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for p in PRESETS {
+                                ui.selectable_value(
+                                    &mut app.filter_draft.shutter_max,
+                                    Some(p),
+                                    label(p),
+                                );
+                            }
+                        });
+                    let mut mx = app.filter_draft.shutter_max.unwrap_or(30.0);
+                    if ui
+                        .add(egui::DragValue::new(&mut mx).range(0.0001..=60.0).speed(0.05).suffix("s"))
+                        .changed()
+                    {
+                        app.filter_draft.shutter_max = Some(mx);
+                    }
+                    if ui.button(t("清除", "Clear")).clicked() {
+                        app.filter_draft.shutter_min = None;
+                        app.filter_draft.shutter_max = None;
+                    }
+                });
+
                 // 日期范围.
                 section_heading(ui, t("拍摄日期范围", "Capture date range"));
                 ui.horizontal(|ui| {
