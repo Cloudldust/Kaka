@@ -108,6 +108,8 @@ pub struct AppState {
     pub show_crash_recovery: bool,
     pub show_filter: bool,
     pub show_export: bool,
+    /// 数据库损坏三按钮弹窗（PRD 10.6），启动检测到损坏时置位。
+    pub show_db_corruption: bool,
     pub crash_state: Option<WorkspaceState>,
 
     // Import progress (background job bridge).
@@ -179,6 +181,7 @@ impl AppState {
             show_crash_recovery: false,
             show_filter: false,
             show_export: false,
+            show_db_corruption: false,
             crash_state: None,
             import_running: false,
             import_progress: ImportProgress::default(),

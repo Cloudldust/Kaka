@@ -26,13 +26,29 @@ impl Db {
         Self::open(&path)
     }
 
+    /// A handle for a database that could not even be opened (bad/corrupt
+    /// header): keep the real path on a throwaway in-memory connection so the
+    /// repair dialog can still restore/reset the file at that path. Never fails.
+    pub fn placeholder_at_default() -> Self {
+        let conn = Connection::open_in_memory()
+            .expect("in-memory sqlite connection cannot fail");
+        Db {
+            conn,
+            path: paths::db_path(),
+        }
+    }
+
     /// Open a database at an explicit path. Does NOT run schema init.
+    ///
+    /// The pragmas are best-effort: a corrupt file must still open (so the
+    /// startup can detect the corruption and show the repair dialog) instead of
+    /// failing the whole launch. A healthy DB always sets them successfully.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         // WAL mode + foreign keys and busy timeout (PRD 10.6).
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         Ok(Db {
             conn,
             path: path.to_path_buf(),
@@ -49,19 +65,22 @@ impl Db {
     }
 
     /// Run PRAGMA integrity_check. Returns true when the database reports "ok".
-    /// Any other value means corruption.
+    /// Any other value (including hard SQLITE_CORRUPT errors on a badly damaged
+    /// file) is reported as `Ok(false)` so startup can show the repair dialog
+    /// instead of failing to launch.
     pub fn integrity_check(&self) -> anyhow::Result<bool> {
-        let mut stmt = self
-            .conn
-            .prepare("PRAGMA integrity_check")?;
-        let mut rows = stmt.query([])?;
-        let mut result = String::new();
-        while let Some(row) = rows.next()? {
-            let r: String = row.get(0)?;
-            result.push_str(&r);
-            result.push('\n');
-        }
-        Ok(result.trim() == "ok")
+        let result: rusqlite::Result<String> = (|| {
+            let mut stmt = self.conn.prepare("PRAGMA integrity_check")?;
+            let mut rows = stmt.query([])?;
+            let mut result = String::new();
+            while let Some(row) = rows.next()? {
+                let r: String = row.get(0)?;
+                result.push_str(&r);
+                result.push('\n');
+            }
+            Ok(result)
+        })();
+        Ok(result.map(|s| s.trim() == "ok").unwrap_or(false))
     }
 
     /// Run a WAL checkpoint to flush the WAL back into the main db file.

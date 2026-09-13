@@ -25,7 +25,7 @@ eframe = { version = "0.36.1", optional = true, default-features = false, featur
 egui = { version = "0.36.1", optional = true }
 kamadak-exif = "0.6.1"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "ico", "bmp"] }
-log = "0.4.34"
+log = { version = "0.4.34", features = ["std"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

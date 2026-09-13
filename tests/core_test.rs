@@ -594,6 +594,117 @@ fn export_kept_copy_and_file_list() {
     assert!(lines[0].ends_with("DSC_0001.JPG"), "first path line is wrong: {}", lines[0]);
 }
 
+#[test]
+fn db_manual_backup_restore_and_reset() {
+    use kaka::db::schema;
+
+    let root = temp_root();
+    let db_path = root.join("bk.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
+    assert_eq!(db::photos::count_photos(&db, "").unwrap(), 1);
+
+    // 手动备份.
+    let bak = schema::manual_backup(&db).unwrap();
+    assert!(bak.exists(), "manual backup file should exist");
+
+    // 改动当前库：删掉照片记录.
+    let items = db::photos::list_items_in_folder(&db, &src.to_string_lossy(), kaka::model::SortOrder::FilenameAsc).unwrap();
+    db::photos::delete_photo(&db, items[0].id).unwrap();
+    assert_eq!(db::photos::count_photos(&db, "").unwrap(), 0);
+
+    // 从备份恢复.
+    schema::restore_backup(&mut db, &bak).unwrap();
+    assert_eq!(db::photos::count_photos(&db, "").unwrap(), 1, "restored DB should have the photo again");
+    assert_eq!(db::photos::status_counts(&db, "").unwrap().total, 1);
+
+    // 放弃新建（reset to fresh）.
+    schema::reset_to_fresh(&mut db).unwrap();
+    assert_eq!(db::photos::count_photos(&db, "").unwrap(), 0, "fresh DB should be empty");
+}
+
+#[test]
+fn corrupt_db_still_opens_and_reports_corruption() {
+    use kaka::db::Db;
+    let root = temp_root();
+    let db_path = root.join("corrupt.db");
+
+    // Build a healthy database first (so the file starts as a real SQLite db).
+    {
+        let mut db = Db::open(&db_path).unwrap();
+        db::schema::init(&mut db).unwrap();
+        db::schema::migrate(&mut db).unwrap();
+        let src = root.join("photos");
+        std::fs::create_dir_all(&src).unwrap();
+        make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
+        let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+        import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
+    }
+
+    // Simulate the user editing the file with a text editor: truncate the tail
+    // (deleting part of the data) so the btree no longer matches the header.
+    {
+        let mut data = std::fs::read(&db_path).unwrap();
+        data.truncate(data.len() / 2);
+        std::fs::write(&db_path, &data).unwrap();
+    }
+
+    // Reopening must NOT fail startup: Db::open succeeds and integrity_check
+    // reports Ok(false) (corruption) instead of erroring out.
+    let db = Db::open(&db_path).unwrap();
+    let ok = db.integrity_check().unwrap_or(true);
+    assert!(!ok, "a corrupted DB must report !ok, not error");
+}
+
+#[test]
+fn auto_repair_prefers_manual_backup() {
+    use kaka::db::schema;
+    let root = temp_root();
+    let db_path = root.join("ar.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
+
+    // 手动备份（正是用户报告的场景）.
+    let bak = schema::manual_backup(&db).unwrap();
+    assert!(
+        bak.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().contains("manual_"),
+        "backup should be a manual backup: {}",
+        bak.display()
+    );
+
+    // 关闭连接后截断库文件，模拟损坏.
+    drop(db);
+    {
+        let mut data = std::fs::read(&db_path).unwrap();
+        data.truncate(data.len() / 2);
+        std::fs::write(&db_path, &data).unwrap();
+    }
+    let mut db = Db::open(&db_path).unwrap();
+    assert!(!db.integrity_check().unwrap_or(true), "db must now be corrupt");
+
+    // 自动修复：应优先用最近的手动备份恢复，而不是新建空库.
+    schema::repair_or_reset(&mut db).unwrap();
+    assert_eq!(
+        db::photos::count_photos(&db, "").unwrap(),
+        1,
+        "auto repair must restore from the manual backup, not create a fresh DB"
+    );
+}
+
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
 /// preview referenced by JPEGInterchangeFormat/JPEGInterchangeFormatLength.
 /// This exercises the same path a TIFF-based RAW (NEF/ARW/CR2/DNG/ORF…) uses.

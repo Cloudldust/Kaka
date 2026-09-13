@@ -406,6 +406,9 @@ impl KakaApp {
                   "Welcome to Kaka! Import + cull only. Click Import to add your first photos."),
             );
         }
+        if app.startup.corruption_detected {
+            app.state.show_db_corruption = true;
+        }
         app
     }
 }
@@ -429,9 +432,16 @@ pub fn run() -> anyhow::Result<()> {
     // 2. Database open + integrity + migration.
     let (db, startup) = init_database()?;
 
-    // 3. Crash marker bookkeeping.
-    let was_crash = db::workspace::crash_marker(&db)?;
-    db::workspace::mark_crash(&db)?;
+    // 3. Crash marker bookkeeping (skipped while the DB is corrupt — the
+    // corruption dialog decides the fate of the database first).
+    let was_crash = if startup.corruption_detected {
+        false
+    } else {
+        db::workspace::crash_marker(&db)?
+    };
+    if !startup.corruption_detected {
+        db::workspace::mark_crash(&db)?;
+    }
 
     // 4. Build the app.
     let icon = load_icon();
@@ -452,19 +462,23 @@ pub fn run() -> anyhow::Result<()> {
         native,
         Box::new(move |cc| {
             let mut app = KakaApp::new(cc, db, cfg, startup, was_crash);
-            // Resume prompt comes before crash recovery (PRD 6.1 startup order).
-            if let Some(s) = crate::app::session::list_incomplete().into_iter().next() {
-                app.pending_resume = Some(s);
-                app.show_resume = true;
-            }
-            if app.pending_crash.is_some() {
-                app.state.show_crash_recovery = true;
-            } else if app.state.config.auto_open_last_workspace {
-                if let Ok(Some(saved)) = db::workspace::load(&app.state.db) {
-                    if let Some(folder) = saved.current_folder_path {
-                        let sort = SortOrder::from_code(&saved.current_sort);
-                        let _ = app.state.open_workspace(&folder, sort);
-                        app.state.ws.current_index = saved.current_index.max(0) as usize;
+            // A corrupt database takes priority: the three-button repair dialog
+            // runs before any resume/crash/auto-open logic.
+            if !app.startup.corruption_detected {
+                // Resume prompt comes before crash recovery (PRD 6.1 startup order).
+                if let Some(s) = crate::app::session::list_incomplete().into_iter().next() {
+                    app.pending_resume = Some(s);
+                    app.show_resume = true;
+                }
+                if app.pending_crash.is_some() {
+                    app.state.show_crash_recovery = true;
+                } else if app.state.config.auto_open_last_workspace {
+                    if let Ok(Some(saved)) = db::workspace::load(&app.state.db) {
+                        if let Some(folder) = saved.current_folder_path {
+                            let sort = SortOrder::from_code(&saved.current_sort);
+                            let _ = app.state.open_workspace(&folder, sort);
+                            app.state.ws.current_index = saved.current_index.max(0) as usize;
+                        }
                     }
                 }
             }
@@ -482,14 +496,27 @@ pub fn run() -> anyhow::Result<()> {
 
 fn init_database() -> anyhow::Result<(Db, StartupInfo)> {
     let mut startup = StartupInfo::default();
-    let mut db = Db::open_default()?;
+    // Lenient open: if the file cannot even be opened (corrupt header from a
+    // text-editor edit), keep the real path on an in-memory placeholder so the
+    // three-button repair dialog can still restore/reset it.
+    let mut db = match Db::open_default() {
+        Ok(db) => db,
+        Err(e) => {
+            log::error!("打开数据库失败（可能损坏）: {e}");
+            startup.corruption_detected = true;
+            Db::placeholder_at_default()
+        }
+    };
 
-    // Integrity check (PRD 10.6). On failure try to repair or reset.
-    if !db.integrity_check()? {
+    // Integrity check (PRD 10.6). On failure, do NOT auto-repair: the app shows
+    // the three-button dialog (自动修复 / 手动选备份 / 放弃新建) so the user
+    // decides. init/migrate are skipped until the DB has been repaired.
+    if !db.integrity_check().unwrap_or(false) {
         startup.corruption_detected = true;
-        log::error!("数据库完整性检查失败，尝试修复");
-        db::schema::repair_or_reset(&mut db)?;
-        startup.db_repaired = true;
+        log::error!("数据库完整性检查失败，等待用户选择修复方式");
+    }
+    if startup.corruption_detected {
+        return Ok((db, startup));
     }
 
     // Create schema + run migrations (PRD 10.5).
@@ -712,6 +739,7 @@ impl KakaApp {
             || self.state.show_crash_recovery
             || self.state.show_export
             || self.state.show_filter
+            || self.state.show_db_corruption
             || self.confirm.is_some();
 
         // Esc chain: cancel digit jump → close dialog → exit fullscreen →
@@ -1440,6 +1468,7 @@ impl KakaApp {
                 || self.state.show_import
                 || self.state.show_settings
                 || self.state.show_crash_recovery
+                || self.state.show_db_corruption
                 || self.show_resume
             {
                 continue;
@@ -1474,6 +1503,117 @@ impl KakaApp {
         self.state.show_crash_recovery = false;
         self.save_workspace();
         self.toast(ToastKind::Success, "工作区已恢复");
+    }
+
+    // ---- 数据库维护（PRD 10.6 三按钮弹窗 / UI 5.3.4 设置-数据库） ----
+
+    /// Finish DB recovery: close the corruption dialog, clear the flag, toast,
+    /// and try to reopen the last workspace on the repaired database.
+    fn db_repaired(&mut self, msg: String) {
+        self.state.show_db_corruption = false;
+        self.startup.corruption_detected = false;
+        self.toast(ToastKind::Success, msg);
+        if self.state.config.auto_open_last_workspace {
+            if let Ok(Some(saved)) = db::workspace::load(&self.state.db) {
+                if let Some(folder) = saved.current_folder_path {
+                    let sort = SortOrder::from_code(&saved.current_sort);
+                    let _ = self.state.open_workspace(&folder, sort);
+                    self.state.ws.current_index = saved.current_index.max(0) as usize;
+                }
+            }
+        }
+    }
+
+    /// Run a repair action then ensure schema init + migration.
+    fn run_db_recovery(
+        &mut self,
+        action: impl FnOnce(&mut Db) -> anyhow::Result<()>,
+        ok_msg: String,
+    ) {
+        let res = (|| -> anyhow::Result<()> {
+            action(&mut self.state.db)?;
+            db::schema::init(&mut self.state.db)?;
+            db::schema::migrate(&mut self.state.db)?;
+            Ok(())
+        })();
+        match res {
+            Ok(()) => self.db_repaired(ok_msg),
+            Err(e) => self.toast(ToastKind::Error, format!("数据库修复失败：{e}")),
+        }
+    }
+
+    /// 损坏弹窗：自动修复（优先恢复最近可用备份，否则新建）。
+    pub fn db_auto_repair(&mut self) {
+        let msg = t(
+            "数据库已自动修复（优先恢复最近可用备份）",
+            "Database auto-repaired (nearest valid backup restored)",
+        )
+        .to_string();
+        self.run_db_recovery(|db| db::schema::repair_or_reset(db), msg);
+    }
+
+    /// 损坏弹窗：放弃损坏库，新建空数据库。
+    pub fn db_reset_fresh(&mut self) {
+        let msg = t(
+            "已放弃损坏的数据库，新建空数据库",
+            "Corrupt database discarded; created a fresh empty one",
+        )
+        .to_string();
+        self.run_db_recovery(|db| db::schema::reset_to_fresh(db), msg);
+    }
+
+    /// 损坏弹窗：从用户选择的备份恢复。
+    pub fn db_restore_from(&mut self, path: &std::path::Path) {
+        let msg = format!("已从备份恢复：{}", path.display());
+        let p = path.to_path_buf();
+        self.run_db_recovery(move |db| db::schema::restore_backup(db, &p), msg);
+    }
+
+    /// 设置 → 数据库：完整性检查。
+    pub fn check_db_integrity(&mut self) {
+        match self.state.db.integrity_check() {
+            Ok(true) => self.toast(
+                ToastKind::Success,
+                t("数据库完整性正常", "Database integrity OK"),
+            ),
+            Ok(false) => self.toast(
+                ToastKind::Error,
+                t(
+                    "数据库完整性检查失败（数据库可能损坏）",
+                    "Integrity check failed (database may be corrupt)",
+                ),
+            ),
+            Err(e) => self.toast(ToastKind::Error, format!("完整性检查出错：{e}")),
+        }
+    }
+
+    /// 设置 → 数据库：手动备份。
+    pub fn manual_db_backup(&mut self) {
+        match db::schema::manual_backup(&self.state.db) {
+            Ok(p) => self.toast(ToastKind::Success, format!("已备份到：{}", p.display())),
+            Err(e) => self.toast(ToastKind::Error, format!("备份失败：{e}")),
+        }
+    }
+
+    /// 设置 → 数据库：从用户选择的备份恢复（替换当前库并重载工作区）。
+    pub fn restore_db_pick(&mut self, path: &std::path::Path) {
+        let p = path.to_path_buf();
+        let res = (|| -> anyhow::Result<()> {
+            db::schema::restore_backup(&mut self.state.db, &p)?;
+            db::schema::init(&mut self.state.db)?;
+            db::schema::migrate(&mut self.state.db)?;
+            Ok(())
+        })();
+        match res {
+            Ok(()) => {
+                self.state.undo_stack.clear();
+                self.state.redo_stack.clear();
+                self.state.histograms.clear();
+                let _ = self.state.reload_current();
+                self.toast(ToastKind::Success, format!("已从备份恢复：{}", path.display()));
+            }
+            Err(e) => self.toast(ToastKind::Error, format!("恢复失败：{e}")),
+        }
     }
 
     /// Drain background thumbnail-completion events and invalidate texture

@@ -109,9 +109,12 @@ fn backup_version(db: &Db, ver: i64) -> anyhow::Result<()> {
     // Flush WAL first so the backup file is complete.
     let _ = db.checkpoint();
 
-    let backup = db
+    let name = db
         .path
-        .with_file_name(format!("kaka.db.v{ver}.bak"));
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("kaka.db");
+    let backup = db.path.with_file_name(format!("{name}.v{ver}.bak"));
     std::fs::copy(&db.path, &backup)
         .with_context(|| format!("备份数据库到 {} 失败", backup.display()))?;
 
@@ -154,7 +157,8 @@ pub fn repair_or_reset(db: &mut Db) -> anyhow::Result<()> {
     if let Some(bak) = find_good_backup(&db.path)? {
         // Close current connection by replacing it.
         let new_path = db.path.clone();
-        db.conn = Connection::open(&new_path)?;
+        db.conn = Connection::open_in_memory()?;
+        remove_wal_shm(&new_path);
         std::fs::copy(&bak, &new_path)
             .with_context(|| format!("用备份 {} 恢复数据库失败", bak.display()))?;
         // Re-open after copy to avoid stale handles.
@@ -178,11 +182,16 @@ fn find_good_backup(db_path: &std::path::Path) -> anyhow::Result<Option<std::pat
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&format!("{prefix}.v")) && name.ends_with(".bak") {
-            let meta = entry.metadata()?;
-            if let Ok(t) = meta.modified() {
-                backups.push((t, entry.path()));
-            }
+        // Both automatic migration backups (kaka.db.v*.bak) and manual backups
+        // (kaka.db.manual_*.bak) are candidates for auto-repair.
+        let is_auto = name.starts_with(&format!("{prefix}.v")) && name.ends_with(".bak");
+        let is_manual = name.starts_with(&format!("{prefix}.manual_")) && name.ends_with(".bak");
+        if !(is_auto || is_manual) {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        if let Ok(t) = meta.modified() {
+            backups.push((t, entry.path()));
         }
     }
     backups.sort_by(|a, b| b.0.cmp(&a.0)); // try newest first
@@ -207,18 +216,122 @@ fn find_good_backup(db_path: &std::path::Path) -> anyhow::Result<Option<std::pat
 }
 
 /// Rename the corrupt db and create a fresh, empty one.
-fn reset_to_fresh(db: &mut Db) -> anyhow::Result<()> {
+pub fn reset_to_fresh(db: &mut Db) -> anyhow::Result<()> {
     let path = db.path.clone();
-    if path != std::path::PathBuf::from(":memory:") {
-        let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let corrupted = path.with_file_name(format!("kaka.db.corrupted_{stamp}"));
-        let _ = std::fs::rename(&path, &corrupted);
-        log::warn!("数据库损坏，已重命名为 {}", corrupted.display());
+    if path == std::path::PathBuf::from(":memory:") {
+        anyhow::bail!("内存数据库不支持重建");
     }
+    // Close the old connection first so its file/WAL handles are released.
+    db.conn = Connection::open_in_memory()?;
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let corrupted = path.with_file_name(format!("kaka.db.corrupted_{stamp}"));
+    let _ = std::fs::rename(&path, &corrupted);
+    remove_wal_shm(&path);
+    log::warn!("数据库损坏，已重命名为 {}", corrupted.display());
     db.conn = Connection::open(&path)?;
     db.conn.pragma_update(None, "journal_mode", "WAL")?;
     super::schema::init(db)?;
     log::info!("已新建空数据库: {}", path.display());
+    Ok(())
+}
+
+/// Delete any leftover `<db>-wal` / `<db>-shm` files for a live database path
+/// (stale WAL from a replaced connection would corrupt a restored/fresh DB).
+fn remove_wal_shm(path: &std::path::Path) {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    let _ = std::fs::remove_file(wal);
+    let _ = std::fs::remove_file(shm);
+}
+
+/// Restore the database from a user-chosen backup file (PRD 10.6「手动选备份」,
+/// UI 5.3.4「恢复备份」). The backup must pass `integrity_check`; the current
+/// (possibly corrupt) file is renamed aside and replaced by the backup.
+pub fn restore_backup(db: &mut Db, backup_path: &std::path::Path) -> anyhow::Result<()> {
+    if !backup_path.is_file() {
+        anyhow::bail!("备份文件不存在: {}", backup_path.display());
+    }
+    if db.path == std::path::PathBuf::from(":memory:") {
+        anyhow::bail!("内存数据库不支持恢复备份");
+    }
+    // Verify the chosen backup is intact before touching the live file.
+    let verify = (|| -> anyhow::Result<bool> {
+        let c = Connection::open(backup_path)?;
+        let mut stmt = c.prepare("PRAGMA integrity_check")?;
+        let mut rows = stmt.query([])?;
+        let mut s = String::new();
+        while let Some(row) = rows.next()? {
+            let r: String = row.get(0)?;
+            s.push_str(&r);
+        }
+        Ok(s.trim() == "ok")
+    })()?;
+    if !verify {
+        anyhow::bail!("所选备份未通过完整性检查: {}", backup_path.display());
+    }
+
+    let path = db.path.clone();
+    // Close the old connection so its file + WAL handles are released.
+    db.conn = Connection::open_in_memory()?;
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let old = path.with_file_name(format!("kaka.db.pre_restore_{stamp}"));
+    let _ = std::fs::rename(&path, &old);
+    // Remove any stale WAL/SHM for the live path so the restored file starts clean.
+    remove_wal_shm(&path);
+    std::fs::copy(backup_path, &path)
+        .with_context(|| format!("复制备份 {} 失败", backup_path.display()))?;
+    db.conn = Connection::open(&path)?;
+    db.conn.pragma_update(None, "journal_mode", "WAL")?;
+    db.conn.pragma_update(None, "synchronous", "NORMAL")?;
+    db.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    log::info!("数据库已从备份恢复: {}", backup_path.display());
+    Ok(())
+}
+
+/// Create a manual backup of the live database to `<db>.manual_<ts>.bak`,
+/// pruning old manual backups (keep 5). Returns the backup path.
+pub fn manual_backup(db: &Db) -> anyhow::Result<std::path::PathBuf> {
+    if db.path == std::path::PathBuf::from(":memory:") {
+        anyhow::bail!("内存数据库不支持备份");
+    }
+    let _ = db.checkpoint(); // flush WAL so the copy is complete
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let name = db
+        .path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("kaka.db");
+    let backup = db.path.with_file_name(format!("{name}.manual_{stamp}.bak"));
+    std::fs::copy(&db.path, &backup)
+        .with_context(|| format!("备份数据库到 {} 失败", backup.display()))?;
+    prune_manual_backups(&db.path, 5)?;
+    Ok(backup)
+}
+
+/// Keep only the newest `keep` manual backups matching `kaka.db.manual_*.bak`.
+fn prune_manual_backups(db_path: &std::path::Path, keep: usize) -> anyhow::Result<()> {
+    let dir = db_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let prefix = db_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("kaka.db");
+    let mut backups: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&format!("{prefix}.manual_")) && name.ends_with(".bak") {
+            let meta = entry.metadata()?;
+            if let Ok(t) = meta.modified() {
+                backups.push((t, entry.path()));
+            }
+        }
+    }
+    backups.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    for (_, p) in backups.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(p);
+    }
     Ok(())
 }
 

@@ -11,6 +11,11 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
+    // 数据库损坏三按钮弹窗（PRD 10.6）优先级最高：先修库，其他一切延后。
+    if app.state.show_db_corruption {
+        db_corruption_dialog(app, ctx);
+        return;
+    }
     if app.confirm.is_some() {
         confirm_dialog(app, ctx);
     }
@@ -622,6 +627,118 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     ctx.request_repaint();
 }
 
+fn db_corruption_dialog(app: &mut KakaApp, ctx: &egui::Context) {
+    dim_backdrop(ctx);
+    egui::Window::new(t("数据库损坏", "Database Corrupt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([560.0, 320.0])
+        .frame(dialog_frame())
+        .show(ctx, |ui| {
+            ui.label(
+                RichText::new(t("检测到数据库损坏", "Database integrity check failed"))
+                    .size(20.0)
+                    .strong()
+                    .color(theme::TEXT),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(t(
+                    "启动时的完整性检查（PRAGMA integrity_check）未通过。请选择处理方式：",
+                    "The startup integrity check failed. Please choose how to proceed:",
+                ))
+                .size(14.0)
+                .color(theme::TEXT_SECONDARY),
+            );
+            ui.add_space(12.0);
+
+            let mut action: Option<DbRepairAction> = None;
+            // 自动修复.
+            if ui
+                .add(egui::Button::new(
+                    RichText::new(t("自动修复", "Auto Repair"))
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
+                ).fill(theme::ACCENT).stroke(egui::Stroke::new(1.0, theme::ACCENT)))
+                .on_hover_text(t(
+                    "优先恢复最近一次可用的自动备份；没有可用备份则新建空数据库。",
+                    "Restore the nearest valid automatic backup, or create a fresh database if none is usable.",
+                ))
+                .clicked()
+            {
+                action = Some(DbRepairAction::AutoRepair);
+            }
+            // 手动选备份.
+            if ui
+                .add(egui::Button::new(RichText::new(
+                    t("手动选择备份恢复…", "Restore From Backup…"),
+                ).color(theme::TEXT)))
+                .on_hover_text(t(
+                    "从你手动选择的 .bak 备份文件恢复。",
+                    "Restore from a .bak backup file you pick.",
+                ))
+                .clicked()
+            {
+                action = Some(DbRepairAction::PickBackup);
+            }
+            // 放弃新建.
+            if ui
+                .add(egui::Button::new(RichText::new(
+                    t("放弃损坏库，新建空数据库", "Discard & Create Fresh Database"),
+                ).color(theme::DELETE)))
+                .on_hover_text(t(
+                    "原损坏文件会被保留为 .corrupted_* 以便人工找回。",
+                    "The corrupt file is kept as .corrupted_* for manual recovery.",
+                ))
+                .clicked()
+            {
+                action = Some(DbRepairAction::ResetFresh);
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(t(
+                    "提示：损坏弹窗出现前若已有「手动备份」或「自动备份」，选择恢复是最稳妥的方式。",
+                    "If you have any manual or automatic backup, restoring from it is the safest choice.",
+                ))
+                .size(12.0)
+                .color(theme::TEXT_WEAK),
+            );
+
+            match action {
+                Some(DbRepairAction::AutoRepair) => app.db_auto_repair(),
+                Some(DbRepairAction::ResetFresh) => app.db_reset_fresh(),
+                Some(DbRepairAction::PickBackup) => {
+                    let start_dir = app
+                        .state
+                        .db
+                        .path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default();
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_title(t("选择备份文件", "Select backup file"))
+                        .add_filter("SQLite 备份", &["bak"])
+                        .set_directory(start_dir)
+                        .pick_file()
+                    {
+                        app.db_restore_from(&p);
+                    }
+                }
+                None => {}
+            }
+        });
+    ctx.request_repaint();
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DbRepairAction {
+    AutoRepair,
+    PickBackup,
+    ResetFresh,
+}
+
 fn crash_recovery(app: &mut KakaApp, ctx: &egui::Context) {
     let Some(state) = app.pending_crash.clone() else {
         app.state.show_crash_recovery = false;
@@ -702,6 +819,8 @@ fn crash_recovery(app: &mut KakaApp, ctx: &egui::Context) {
 fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     // Edit a draft; only "保存" applies it to the live config and persists it.
     let mut save = false;
+    // 设置 → 数据库：恢复备份（需要文件对话框，窗口后处理）。
+    let mut restore_clicked = false;
 
     // Custom-key capture (PRD 7.2.1): read the first pressed key event this
     // frame. Esc cancels; reserved keys and conflicts keep the capture open
@@ -1008,6 +1127,27 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                     }
                 });
 
+                section(ui, t("数据库", "Database"));
+                ui.horizontal(|ui| {
+                    if ui.button(t("完整性检查", "Integrity check")).clicked() {
+                        app.check_db_integrity();
+                    }
+                    if ui.button(t("手动备份", "Back up now")).clicked() {
+                        app.manual_db_backup();
+                    }
+                    if ui.button(t("恢复备份…", "Restore backup…")).clicked() {
+                        restore_clicked = true;
+                    }
+                });
+                ui.label(
+                    RichText::new(t(
+                        "手动备份会保存一份当前数据库快照（保留最近 5 份）；恢复备份会用所选备份替换当前库。",
+                        "Back up now saves a snapshot of the current database (keeps the latest 5); restoring replaces the current database with the chosen backup.",
+                    ))
+                    .size(12.0)
+                    .color(theme::TEXT_WEAK),
+                );
+
                 section(ui, t("关于", "About"));
                 ui.label(
                     RichText::new(format!("咔咔 Kaka v{}", env!("CARGO_PKG_VERSION")))
@@ -1031,6 +1171,23 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                 });
             });
         });
+    if restore_clicked {
+        let start_dir = app
+            .state
+            .db
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        if let Some(p) = rfd::FileDialog::new()
+            .set_title(t("选择备份文件", "Select backup file"))
+            .add_filter("SQLite 备份", &["bak"])
+            .set_directory(start_dir)
+            .pick_file()
+        {
+            app.restore_db_pick(&p);
+        }
+    }
     if save {
         // Apply draft to live config + persist + switch the UI language.
         app.kb_capture = None;
