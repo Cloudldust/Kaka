@@ -1383,7 +1383,6 @@ fn schema_v1_migrates_to_v2_with_backfill() {
 
 #[test]
 fn filter_aperture_shutter_ranges() {
-    use kaka::app::import; // re-exported helpers not needed; keeps imports tidy
     use kaka::model::{Filter, Photo, SortOrder};
 
     let root = temp_root();
@@ -1475,5 +1474,68 @@ fn filter_aperture_shutter_ranges() {
     let out = ids(Filter::default());
     assert_eq!(out.len(), 4);
 
-    let _ = import::add_mode_import; // silence unused-import churn if any
+}
+
+#[cfg(feature = "gui")]
+#[test]
+fn preload_worker_decodes_cached_preview_and_skips_missing() {
+    use kaka::app::preload::{PreloadJob, PreloadWorker};
+    use kaka::io::thumbnails;
+
+    let root = temp_root();
+    let src = root.join("DSC_0001.JPG");
+    make_jpeg(&src, [120, 60, 200]);
+    let hash = thumbnails::thumb_hash_for(src.to_string_lossy().as_ref(), 1, "");
+
+    // Generate the 1920px disk preview the worker is expected to decode.
+    assert!(thumbnails::generate_preview(
+        Path::new(&src),
+        &thumbnails::preview_path(&hash),
+        thumbnails::PREVIEW_LONG_EDGE,
+        thumbnails::PREVIEW_QUALITY
+    )
+    .unwrap());
+
+    let mut w = PreloadWorker::new();
+    w.set_queue(vec![PreloadJob {
+        photo_id: -1,
+        hash: hash.clone(),
+        path: src.to_string_lossy().into_owned(),
+    }]);
+
+    let mut got = None;
+    for _ in 0..300 {
+        for d in w.poll() {
+            got = Some(d);
+        }
+        if got.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let done = got.expect("preload should complete");
+    assert_eq!(done.photo_id, -1);
+    assert_eq!(done.hash, hash);
+    let img = done.image.expect("cached preview should decode");
+    assert!(img.width() > 0 && (img.width() as u32) <= thumbnails::PREVIEW_LONG_EDGE);
+
+    // A missing disk preview yields Done { image: None } (caller skips it).
+    w.set_queue(vec![PreloadJob {
+        photo_id: -2,
+        hash: "nonexistent".into(),
+        path: String::new(),
+    }]);
+    let mut got2 = None;
+    for _ in 0..300 {
+        for d in w.poll() {
+            got2 = Some(d);
+        }
+        if got2.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let done2 = got2.expect("missing-preview job should still report");
+    assert_eq!(done2.photo_id, -2);
+    assert!(done2.image.is_none());
 }

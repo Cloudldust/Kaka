@@ -107,6 +107,17 @@ pub fn thumb_exists(hash: &str, dpi_scale: f32) -> bool {
     thumb_path(hash, dpi_scale).exists()
 }
 
+/// True when BOTH the thumbnail and the 1920px preview exist on disk.
+///
+/// Callers use this to decide whether a photo still needs (re)generation. It
+/// must be "both present", not "both absent": the import pre-scan grid
+/// generates thumbnails only, so a photo can legitimately have a thumb but no
+/// preview — checking `!thumb && !preview` silently skipped every such photo
+/// and its preview was never generated.
+pub fn caches_complete(hash: &str, dpi_scale: f32) -> bool {
+    thumb_path(hash, dpi_scale).exists() && preview_path(hash).exists()
+}
+
 /// The camera-rendered reference image the user actually sees before the RAW
 /// decode lands: the disk preview when it exists (what fit view shows), else
 /// the embedded preview decoded from the RAW. Used by the zoom worker to tone
@@ -335,4 +346,42 @@ pub fn generate_caches(src: &Path, hash: &str, dpi_scale: f32) -> anyhow::Result
     }
 
     Ok(wrote || (thumb_dest.exists() && prev_dest.exists()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the "only the first N photos ever got previews" bug:
+    /// the regeneration predicate must treat a thumbnail-without-preview as
+    /// incomplete (the import grid pre-scan generates thumbnails only).
+    #[test]
+    fn caches_complete_requires_both_files() {
+        // Point the cache root at a scratch dir so the real cache is untouched.
+        let dir = std::env::temp_dir().join(format!("kaka_caches_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("thumbs")).unwrap();
+        std::fs::create_dir_all(dir.join("previews")).unwrap();
+        crate::paths::set_cache_override(Some(dir.clone()));
+
+        let src = dir.join("src.jpg");
+        let img = image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 5) as u8, 90])
+        });
+        img.save(&src).unwrap();
+        let hash = thumb_hash_for(src.to_string_lossy().as_ref(), 1, "");
+
+        // A thumbnail-only state (exactly what the pre-scan grid leaves).
+        std::fs::write(thumb_path(&hash, 1.0), b"thumb").unwrap();
+        assert!(!caches_complete(&hash, 1.0), "thumb without preview is incomplete");
+
+        // Generating caches fills in the missing preview and completes the pair.
+        assert!(generate_caches(&src, &hash, 1.0).unwrap());
+        assert!(preview_path(&hash).exists());
+        assert!(caches_complete(&hash, 1.0));
+
+        crate::io::cache_index::reset_global();
+        crate::paths::set_cache_override(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

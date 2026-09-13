@@ -6,6 +6,8 @@ pub mod copy;
 pub mod export;
 pub mod import;
 pub mod memcache;
+#[cfg(feature = "gui")]
+pub mod preload;
 pub mod session;
 pub mod state;
 pub mod shortcuts;

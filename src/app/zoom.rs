@@ -128,6 +128,12 @@ impl ZoomWorker {
         self.pending.contains(&photo_id)
     }
 
+    /// True while ANY full-resolution decode is queued or running (PRD 9.5:
+    /// background preview preloading pauses so RAW decoding gets the IO).
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// Non-blocking drain of finished messages.
     pub fn poll(&mut self) -> Vec<ZoomMsg> {
         let mut out = Vec::new();

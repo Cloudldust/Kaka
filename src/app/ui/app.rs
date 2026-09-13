@@ -126,6 +126,10 @@ pub struct KakaApp {
     /// 稍后处理 (UI 3.3.1): hide the missing-file overlay for this photo until
     /// another photo is selected.
     pub missing_overlay_dismissed: Option<i64>,
+    /// 后台预解码 (PRD 9.5): ±1 邻居的预览纹理预载 worker（结果经 poll 领取）。
+    pub preview_preload: crate::app::preload::PreloadWorker,
+    /// 预览缓存文件缺失的 (id, hash)，本会话内不再尝试预载。
+    pub preload_skip: std::collections::HashSet<(i64, String)>,
 
     // Zoom (Z-key) view state (PRD 7.4). The pan anchor is stored as the image
     // point (fractions 0..1) shown at the viewport center, so it survives the
@@ -343,6 +347,8 @@ impl KakaApp {
             import_scan_dbg_sig: (0, 0, 0, 0, 0),
             import_report_view: None,
             missing_overlay_dismissed: None,
+            preview_preload: crate::app::preload::PreloadWorker::new(),
+            preload_skip: std::collections::HashSet::new(),
             zoom_active: false,
             zoom_center: (0.5, 0.5),
             zoom_scale_target: 1.0,
@@ -1472,6 +1478,74 @@ impl KakaApp {
 
     /// Drain background thumbnail-completion events and invalidate texture
     /// cache entries so the fresh thumbnail/preview is loaded next frame.
+    /// 后台预解码 (PRD 9.5): 空闲时把当前照片 ±1 邻居的 1920px 预览图解码
+    /// 进内存纹理缓存。仅无导入/无扫描/无导出、非 Z 放大且无 Z 解码任务时
+    /// 运行；每次重建 ±1 队列（自动取消不再需要的任务），已缓存/已尝试失败
+    /// 的跳过。
+    fn maybe_preload_neighbors(&mut self) {
+        if self.state.import_running || self.import_scan_running || self.export_copy_running {
+            return;
+        }
+        if self.zoom_active || self.zoom_worker.has_pending() {
+            return; // Z 放大/RAW 解码进行中：暂停预读，让出 IO。
+        }
+        let idx = self.state.ws.current_index;
+        let len = self.state.ws.items.len();
+        if len == 0 {
+            return;
+        }
+        let mut jobs = Vec::new();
+        for delta in [1, -1] {
+            let ni = idx as isize + delta;
+            if ni < 0 || ni >= len as isize {
+                continue;
+            }
+            let p = &self.state.ws.items[ni as usize];
+            let Some(hash) = &p.thumb_hash else { continue };
+            if hash.is_empty() {
+                continue;
+            }
+            let key = (p.id, hash.clone());
+            if self.preload_skip.contains(&key) || self.preview_preload.is_queued(&key) {
+                continue;
+            }
+            if self.textures.preview_cached(p.id, hash) {
+                continue; // 已在缓存，不重复解码
+            }
+            if !crate::app::preload::preview_cache_exists(hash) {
+                // 磁盘缓存文件尚未生成（交给工作区缩略图管线），本次跳过。
+                continue;
+            }
+            jobs.push(crate::app::preload::PreloadJob {
+                photo_id: p.id,
+                hash: hash.clone(),
+                path: p.current_path.clone(),
+            });
+        }
+        // 每帧整体重建队列：照片切换后陈旧任务自动被取消。
+        self.preview_preload.set_queue(jobs);
+    }
+
+    /// 领取预解码结果并直接上传进预览纹理 MemLru（egui 纹理需 UI 线程上传）。
+    fn poll_preload(&mut self, ctx: &egui::Context) {
+        for done in self.preview_preload.poll() {
+            match done.image {
+                Some(img) => {
+                    let tex = ctx.load_texture(
+                        format!("preload-{}", done.photo_id),
+                        img,
+                        super::texture::photo_texture_options(),
+                    );
+                    self.textures.insert_preview(done.photo_id, &done.hash, tex);
+                }
+                None => {
+                    self.preload_skip
+                        .insert((done.photo_id, done.hash.clone()));
+                }
+            }
+        }
+    }
+
     pub fn drain_thumbs(&mut self) {
         // At most 2 per frame: each invalidation triggers a synchronous
         // texture reload; spreading them keeps the UI hitch-free while
@@ -1936,9 +2010,11 @@ impl KakaApp {
             .unwrap_or_default();
         for p in &items {
             if let Some(hash) = &p.thumb_hash {
-                let t = crate::io::thumbnails::thumb_path(hash, 1.0);
-                let pv = crate::io::thumbnails::preview_path(hash);
-                if !t.exists() && !pv.exists() {
+                // Enqueue unless BOTH caches exist. Checking "both missing"
+                // instead would skip every photo that has a thumbnail but no
+                // preview — e.g. all of them after the import pre-scan grid
+                // (thumb-only prewarm), so their previews never appeared.
+                if !crate::io::thumbnails::caches_complete(hash, 1.0) {
                     self.thumbs.enqueue(p.id, hash, &p.current_path);
                 }
             }
@@ -1974,6 +2050,8 @@ impl eframe::App for KakaApp {
         self.poll_cache_rebuild();
         self.poll_export_copy();
         self.poll_import_prescan();
+        self.poll_preload(&ctx);
+        self.maybe_preload_neighbors();
         self.handle_input(&ctx);
 
         // Enqueue missing thumb caches once per workspace.

@@ -94,6 +94,21 @@ impl TextureCache {
         }
     }
 
+    /// True when the preview texture is already in the memory LRU (PRD 9.5
+    /// preload uses this to skip already-cached neighbours).
+    pub fn preview_cached(&mut self, photo_id: i64, hash: &str) -> bool {
+        self.preview_map.get(&(photo_id, hash.to_string())).is_some()
+    }
+
+    /// Insert a preloaded preview texture straight into the memory LRU
+    /// (PRD 9.5: the decode happened on the preload worker; upload on the UI
+    /// thread). No disk access.
+    pub fn insert_preview(&mut self, photo_id: i64, hash: &str, tex: TextureHandle) {
+        let bytes = preview_tex_bytes(&tex);
+        self.preview_map
+            .insert((photo_id, hash.to_string()), tex, bytes);
+    }
+
     /// Get the large-preview texture, falling back to the thumbnail.
     /// Returns (texture, needs_gen).
     pub fn preview_for(&mut self, ctx: &egui::Context, photo: &PhotoListItem) -> (TextureHandle, bool) {
@@ -110,9 +125,17 @@ impl TextureCache {
             (tex, false)
         } else {
             // No preview cache yet: fall back to the thumbnail texture, and
-            // signal that a generation job is still needed for the preview.
-            let (t, n) = self.texture_for(ctx, photo);
-            (t, n)
+            // No preview cache yet: fall back to the thumbnail texture. The
+            // "needs" flag tracks the PREVIEW file, not the thumbnail — a
+            // photo can have a thumbnail while its preview is still missing
+            // (the import pre-scan grid prewarms thumbnails only), and keying
+            // it off the thumbnail left such photos stuck on the low-res
+            // texture forever. Enqueueing is idempotent (the worker dedups by
+            // pending) and the generator skips files that already exist, so a
+            // broken-but-present preview cannot spin.
+            let (t, _) = self.texture_for(ctx, photo);
+            let needs = !crate::io::thumbnails::preview_path(&hash).exists();
+            (t, needs)
         }
     }
 
