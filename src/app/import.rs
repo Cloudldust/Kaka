@@ -356,6 +356,7 @@ pub fn prescan_mark(
     db: &mut Db,
     source: &Path,
     recursive: bool,
+    pair_threshold_secs: i64,
     progress: &mut dyn FnMut(usize, usize) -> bool,
 ) -> anyhow::Result<Option<Vec<PrescanItem>>> {
     if !source.exists() || !source.is_dir() {
@@ -422,12 +423,28 @@ pub fn prescan_mark(
     }
     let mut group_id = 0usize;
     for members in groups.into_values() {
-        if members.len() >= 2 {
-            for i in members {
-                out[i].pair_group = Some(group_id);
-            }
-            group_id += 1;
+        if members.len() < 2 {
+            continue;
         }
+        // PRD 6.1.3: 同目录同名 + 拍摄时间差 ≤ 阈值（默认 5s）才判定为一组。
+        let times: Vec<Option<i64>> = members
+            .iter()
+            .map(|&i| crate::model::capture_time_epoch(&out[i].capture_time))
+            .collect();
+        if times.iter().any(|t| t.is_none()) {
+            continue;
+        }
+        let (mn, mx) = (
+            times.iter().flatten().min().copied().unwrap_or(0),
+            times.iter().flatten().max().copied().unwrap_or(0),
+        );
+        if mx - mn > pair_threshold_secs {
+            continue;
+        }
+        for i in members {
+            out[i].pair_group = Some(group_id);
+        }
+        group_id += 1;
     }
     Ok(Some(out))
 }

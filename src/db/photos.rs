@@ -270,6 +270,19 @@ pub fn list_items_in_folder(
     Ok(out)
 }
 
+/// List every member of a RAW+JPG pair group by its `pair_group_id`.
+pub fn list_items_by_pair_group(db: &Db, group_id: i64) -> anyhow::Result<Vec<PhotoListItem>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT * FROM photos WHERE pair_group_id = ?1 ORDER BY original_filename",
+    )?;
+    let mut rows = stmt.query(params![group_id])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(map_list_item(row)?);
+    }
+    Ok(out)
+}
+
 /// Every photo in the library regardless of folder, as
 /// (id, current_path, thumb_hash, file_size, capture_time) — used by the
 /// full cache rebuild (PRD 9.6).

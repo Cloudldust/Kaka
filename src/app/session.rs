@@ -37,6 +37,7 @@ impl ImportSession {
             // Resume never re-clears the card; the 清空存储卡 choice only applies
             // to the initial run.
             clear_card: false,
+            pair_threshold_secs: 5,
         }
     }
 }

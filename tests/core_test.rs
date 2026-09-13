@@ -203,6 +203,7 @@ fn copy_mode_flat_conflicts_and_dedup() {
         recursive: true,
         dedup: true,
         clear_card: false,
+        pair_threshold_secs: 5,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
@@ -250,6 +251,7 @@ fn copy_mode_structure_preserves_relative_dirs() {
         recursive: true,
         dedup: true,
         clear_card: false,
+        pair_threshold_secs: 5,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
@@ -351,6 +353,7 @@ fn copy_mode_date_subfolder() {
         recursive: true,
         dedup: true,
         clear_card: false,
+        pair_threshold_secs: 5,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
@@ -384,6 +387,7 @@ fn copy_mode_resume_progress_continues_from_base() {
         recursive: true,
         dedup: true,
         clear_card: false,
+        pair_threshold_secs: 5,
     };
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     let out = kaka::app::copy::copy_mode_import(&mut db, &src, &opts, false, 0, &mut prog, None).unwrap();
@@ -703,6 +707,82 @@ fn auto_repair_prefers_manual_backup() {
         1,
         "auto repair must restore from the manual backup, not create a fresh DB"
     );
+}
+
+#[test]
+fn pair_time_threshold_respected() {
+    use kaka::app::copy::reconcile_pairs;
+    let root = temp_root();
+    let db_path = root.join("pt.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    // 同目录同 stem、不同扩展名（模拟 RAW+JPG）。
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
+    make_jpeg(&src.join("DSC_0001.JPEG"), [4, 5, 6]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
+
+    let folder = src.to_string_lossy();
+    // 拍摄时间相同（同秒 mtime）→ 5s 阈值内应配对。
+    reconcile_pairs(&mut db, &folder, 5).unwrap();
+    let items = db::photos::list_items_in_folder(&db, &folder, kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert!(items.iter().all(|p| p.pair_group_id.is_some()), "same-time same-stem must pair");
+
+    // 把 .JPEG 的拍摄时间 +10s → 超出 5s 阈值，必须解配对。
+    let jpeg = items.iter().find(|p| p.original_filename.ends_with(".JPEG")).unwrap();
+    db.conn.execute(
+        "UPDATE photos SET capture_time = datetime(capture_time, '+10 seconds') WHERE id = ?1",
+        rusqlite::params![jpeg.id],
+    ).unwrap();
+    reconcile_pairs(&mut db, &folder, 5).unwrap();
+    let items = db::photos::list_items_in_folder(&db, &folder, kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert!(items.iter().all(|p| p.pair_group_id.is_none()), ">5s apart must NOT pair");
+
+    // 阈值放宽到 10s → 重新配对。
+    reconcile_pairs(&mut db, &folder, 10).unwrap();
+    let items = db::photos::list_items_in_folder(&db, &folder, kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert!(items.iter().all(|p| p.pair_group_id.is_some()), "within 10s should pair");
+
+    // 启动级全库重配对（reconcile_pairs_all）在 5s 阈值下再次解配对。
+    kaka::app::copy::reconcile_pairs_all(&mut db, 5).unwrap();
+    let items = db::photos::list_items_in_folder(&db, &folder, kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert!(items.iter().all(|p| p.pair_group_id.is_none()), "reconcile_pairs_all must honor the threshold too");
+}
+
+#[test]
+fn prescan_pair_respects_time_threshold() {
+    use kaka::app::import::prescan_mark;
+    let root = temp_root();
+    let db_path = root.join("pp.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
+    let jpeg = src.join("DSC_0001.JPEG");
+    make_jpeg(&jpeg, [4, 5, 6]);
+    // 把 .JPEG 的 mtime +10s（prescan 用 mtime 兜底 → 时间差 10s）。
+    let t = std::fs::metadata(&jpeg).unwrap().modified().unwrap() + std::time::Duration::from_secs(10);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&jpeg)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+
+    let items = prescan_mark(&mut db, &src, true, 5, &mut |_d, _t| true).unwrap().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|i| i.pair_group.is_none()), "10s apart must not pair in prescan with 5s threshold");
+
+    // 阈值 30s → 应配对。
+    let items = prescan_mark(&mut db, &src, true, 30, &mut |_d, _t| true).unwrap().unwrap();
+    assert!(items.iter().all(|i| i.pair_group.is_some()), "within 30s should pair in prescan");
 }
 
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
@@ -1188,7 +1268,7 @@ fn import_prescan_marks_new_exists_and_repair() {
     make_jpeg(&dir_a.join("DSC_0003.JPG"), [70, 80, 90]);
 
     let mut cancelled_checks = 0usize;
-    let items = prescan_mark(&mut db, &root, true, &mut |d, t| {
+    let items = prescan_mark(&mut db, &root, true, 5, &mut |d, t| {
         if d >= 2 {
             cancelled_checks += 1;
             return false; // exercise the cancel path once past the first files
@@ -1200,7 +1280,7 @@ fn import_prescan_marks_new_exists_and_repair() {
     let _ = cancelled_checks;
 
     // Full scan (no cancel).
-    let items = prescan_mark(&mut db, &root, true, &mut |_d, _t| true)
+    let items = prescan_mark(&mut db, &root, true, 5, &mut |_d, _t| true)
         .unwrap()
         .unwrap();
     let mark_of = |name: &str| {
@@ -1223,7 +1303,7 @@ fn import_prescan_marks_new_exists_and_repair() {
     assert_ne!(repair.path, dir_a.join("DSC_0001.JPG").to_string_lossy());
 
     // Non-recursive scan of dirB sees only the moved file.
-    let items_b = prescan_mark(&mut db, &dir_b, false, &mut |_d, _t| true)
+    let items_b = prescan_mark(&mut db, &dir_b, false, 5, &mut |_d, _t| true)
         .unwrap()
         .unwrap();
     assert_eq!(items_b.len(), 1);

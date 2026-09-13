@@ -282,16 +282,20 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
-                        if ui
-                            .checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"))
-                            .changed()
-                        {
-                            // 递归开关变化立即重扫（绕过防抖）。
-                            app.import_scan_dirty_since = Some(-1.0e9);
-                        }
-                        ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
-                    });
+                    egui::CollapsingHeader::new(t("高级", "Advanced"))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"))
+                                    .changed()
+                                {
+                                    // 递归开关变化立即重扫（绕过防抖）。
+                                    app.import_scan_dirty_since = Some(-1.0e9);
+                                }
+                                ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
+                            });
+                        });
                 }
                 crate::app::state::ImportMode::Copy => {
                     ui.label(
@@ -340,29 +344,37 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Date, t("按拍摄日期", "By capture date"));
                         ui.radio_value(&mut app.import_org, crate::app::copy::OrgMode::Flat, t("全部平铺", "Flat"));
                     });
-                    ui.horizontal(|ui| {
-                        if ui
-                            .checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"))
-                            .changed()
-                        {
-                            // 递归开关变化立即重扫（绕过防抖）。
-                            app.import_scan_dirty_since = Some(-1.0e9);
-                        }
-                        ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
-                    });
-                    // 清空存储卡 (PRD 6.3): only enabled when the source is a
-                    // removable device; otherwise grayed out and forced off.
-                    let removable =
-                        crate::app::card::is_removable_source(std::path::Path::new(&app.import_path));
-                    if !removable {
-                        app.import_clear_card = false;
-                    }
-                    let checkbox = egui::Checkbox::new(&mut app.import_clear_card, t("导入后清空存储卡", "Clear card after import"));
-                    let resp = ui.add_enabled(removable, checkbox).on_hover_text(t(
-                        "导入完成且全部成功者会移入回收站（非永久删除）。仅当源路径为可移动存储设备时可用。",
-                        "After a fully successful import the copied source files are moved to the recycle bin (not permanently deleted). Only enabled when the source is a removable device.",
-                    ));
-                    let _ = resp;
+                    egui::CollapsingHeader::new(t("高级", "Advanced"))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .checkbox(&mut app.import_recursive, t("递归扫描子文件夹", "Scan subfolders recursively"))
+                                    .changed()
+                                {
+                                    // 递归开关变化立即重扫（绕过防抖）。
+                                    app.import_scan_dirty_since = Some(-1.0e9);
+                                }
+                                ui.checkbox(&mut app.import_dedup, t("去重扫描", "Dedup scan"));
+                            });
+                            // 清空存储卡 (PRD 6.3): only enabled when the source is a
+                            // removable device; otherwise grayed out and forced off.
+                            let removable = crate::app::card::is_removable_source(
+                                std::path::Path::new(&app.import_path),
+                            );
+                            if !removable {
+                                app.import_clear_card = false;
+                            }
+                            let checkbox = egui::Checkbox::new(
+                                &mut app.import_clear_card,
+                                t("导入后清空存储卡", "Clear card after import"),
+                            );
+                            let resp = ui.add_enabled(removable, checkbox).on_hover_text(t(
+                                "导入完成且全部成功者会移入回收站（非永久删除）。仅当源路径为可移动存储设备时可用。",
+                                "After a fully successful import the copied source files are moved to the recycle bin (not permanently deleted). Only enabled when the source is a removable device.",
+                            ));
+                            let _ = resp;
+                        });
                 }
             }
             ui.separator();
@@ -460,6 +472,7 @@ fn import_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                                     recursive: app.import_recursive,
                                     dedup: app.import_dedup,
                                     clear_card: app.import_clear_card,
+                                    pair_threshold_secs: app.state.config.pair_time_threshold_secs as i64,
                                 };
                                 app.start_copy_import(&path, opts, None, Some(only));
                             }
@@ -907,6 +920,14 @@ fn settings_dialog(app: &mut KakaApp, ctx: &egui::Context) {
                         ui.checkbox(&mut d.high_dpi_2x, t("高 DPI 2x 缩略图", "High-DPI @2x thumbnails"));
                         ui.end_row();
                         ui.checkbox(&mut d.wrap_at_end, t("筛选到末尾循环跳张", "Wrap around at the end"));
+                        ui.end_row();
+                        // ⑤ RAW+JPG 配对时间差阈值（PRD 6.1.3，1–30s 默认 5s）。
+                        ui.label(RichText::new(t("RAW+JPG 配对时间差阈值", "RAW+JPG pairing time threshold")).size(13.0).color(theme::TEXT_WEAK));
+                        let mut thr = d.pair_time_threshold_secs as i64;
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Slider::new(&mut thr, 1..=30).suffix(t(" 秒", " s")));
+                        });
+                        d.pair_time_threshold_secs = thr.max(1) as u64;
                         ui.end_row();
                         ui.label(RichText::new(t("语言", "Language")).size(13.0).color(theme::TEXT_WEAK));
                         let mut lang = i18n::Lang::from_code(&d.language);
@@ -2416,15 +2437,44 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
     }
 
     if recycle {
-        let paths: Vec<std::path::PathBuf> =
-            deleted.iter().map(|p| std::path::PathBuf::from(&p.current_path)).collect();
-        let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
-        let n = paths.len();
+        // ④ 整组删除：status=1 的照片展开到整个 RAW+JPG 配对组（漏删同组 JPG
+        // 的问题），并按「组 / 张」计数。配对组（≥2 张同组）计 1 组，未配对
+        // 单张计 1 组。
+        let mut targets: Vec<PhotoListItem> = Vec::new();
+        let mut seen: HashSet<i64> = HashSet::new();
+        for p in &deleted {
+            if let Some(g) = p.pair_group_id {
+                if let Ok(members) = db::photos::list_items_by_pair_group(&app.state.db, g) {
+                    for m in members {
+                        if seen.insert(m.id) {
+                            targets.push(m);
+                        }
+                    }
+                }
+            } else if seen.insert(p.id) {
+                targets.push(p.clone());
+            }
+        }
+        let pair_groups: HashSet<i64> = deleted.iter().filter_map(|p| p.pair_group_id).collect();
+        let singles = deleted.iter().filter(|p| p.pair_group_id.is_none()).count();
+        let group_count = pair_groups.len() + singles;
+        let file_count = targets.len();
+        let paths: Vec<std::path::PathBuf> = targets
+            .iter()
+            .map(|p| std::path::PathBuf::from(&p.current_path))
+            .collect();
+        let ids: Vec<i64> = targets.iter().map(|p| p.id).collect();
+        let group_count_c = group_count;
+        let file_count_c = file_count;
         app.confirm = Some(ConfirmDialog {
             title: t("移入回收站", "Move to recycle bin").into(),
             text: match i18n::lang() {
-                i18n::Lang::Zh => format!("确认将 {n} 张照片及其文件移入回收站？此操作可从回收站恢复，并会清除数据库记录。"),
-                i18n::Lang::En => format!("Move {n} photos and their files to the recycle bin? They can be restored from there; database records will be removed."),
+                i18n::Lang::Zh => format!(
+                    "确认将 {group_count_c} 组 / {file_count_c} 张照片及其文件移入回收站（配对组连同同组 JPG 一起清除）？此操作可从回收站恢复，并会清除数据库记录。"
+                ),
+                i18n::Lang::En => format!(
+                    "Move {group_count_c} group(s) / {file_count_c} photo(s) to the recycle bin (pair groups are removed together with their JPG)? They can be restored from there; database records will be removed."
+                ),
             },
             confirm_label: t("移入回收站", "Recycle").into(),
             danger: true,
@@ -2445,16 +2495,14 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
                 if ok {
                     let msg = match i18n::lang() {
                         i18n::Lang::Zh => format!(
-                            "已将 {} 张照片移入回收站，清理 {} 条记录；{} 张文件已不存在，仅清理数据库记录",
-                            existing.len(),
-                            ids.len(),
-                            missing.len()
+                            "已将 {group_count_c} 组 / {file_count_c} 张移入回收站（清理 {ids_len} 条记录）；{missing_len} 张文件已不存在，仅清理记录",
+                            ids_len = ids.len(),
+                            missing_len = missing.len(),
                         ),
                         i18n::Lang::En => format!(
-                            "Moved {} photo(s) to the recycle bin, removed {} record(s); {} file(s) were already gone — DB records cleaned only",
-                            existing.len(),
-                            ids.len(),
-                            missing.len()
+                            "Moved {group_count_c} group(s) / {file_count_c} photo(s) to the recycle bin (removed {ids_len} records); {missing_len} file(s) were already gone — records cleaned only",
+                            ids_len = ids.len(),
+                            missing_len = missing.len(),
                         ),
                     };
                     app.toast(ToastKind::Success, msg);

@@ -67,6 +67,8 @@ pub struct CopyOptions {
     /// 清空存储卡 (PRD 6.7): after a fully-successful import, move the copied
     /// source files on the removable card to the recycle bin. Default off.
     pub clear_card: bool,
+    /// RAW+JPG 配对拍摄时间差阈值（秒，PRD 6.1.3，默认 5）。
+    pub pair_threshold_secs: i64,
 }
 
 impl Default for CopyOptions {
@@ -77,6 +79,7 @@ impl Default for CopyOptions {
             recursive: true,
             dedup: true,
             clear_card: false,
+            pair_threshold_secs: 5,
         }
     }
 }
@@ -318,7 +321,7 @@ pub fn copy_mode_import(
     }
 
     // Reconcile RAW+JPG pairing within the target folder (PRD 6.1.3).
-    reconcile_pairs(db, &options.target_dir)?;
+    reconcile_pairs(db, &options.target_dir, options.pair_threshold_secs)?;
 
     Ok(outcome)
 }
@@ -529,25 +532,91 @@ pub(crate) fn check_disk_space(target_dir: &str, total_size: u64) -> anyhow::Res
 }
 
 /// Assign `pair_group_id` to same-stem RAW+JPG groups in a folder (PRD 6.1.3).
-pub fn reconcile_pairs(db: &mut Db, folder_prefix: &str) -> anyhow::Result<()> {
+///
+/// A group is only paired when every member's capture time is within
+/// `threshold_secs` of the others (拍摄时间差 ≤ 阈值, default 5s). Any photo
+/// whose capture time cannot be parsed is left unpaired (never risk a wrong
+/// pair). Existing pairings in the folder are cleared first, so the result is
+/// always consistent with the current rule.
+pub fn reconcile_pairs(db: &mut Db, folder_prefix: &str, threshold_secs: i64) -> anyhow::Result<()> {
+    // Clear stale pairings in this folder, then re-derive.
+    db.conn.execute(
+        "UPDATE photos SET pair_group_id = NULL WHERE folder_path LIKE ?1 || '%'",
+        rusqlite::params![folder_prefix],
+    )?;
+
     let items = db::photos::list_items_in_folder(db, folder_prefix, crate::model::SortOrder::CaptureTimeAsc)?;
     // Group by (folder_path, stem).
-    let mut groups: HashMap<(String, String), Vec<i64>> = HashMap::new();
+    let mut groups: HashMap<(String, String), Vec<crate::model::PhotoListItem>> = HashMap::new();
     for p in &items {
         let stem = std::path::Path::new(&p.original_filename)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_lowercase();
-        groups.entry((p.folder_path.clone(), stem)).or_default().push(p.id);
+        groups.entry((p.folder_path.clone(), stem)).or_default().push(p.clone());
     }
-    for (_, ids) in groups {
-        if ids.len() < 2 {
+    for (_, members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        if !within_pair_threshold(&members, threshold_secs) {
             continue;
         }
         // Assign a shared pair_group_id to every member of a same-stem group.
-        let group_id = ids[0];
-        for id in &ids {
+        let group_id = members[0].id;
+        for m in &members {
+            db.conn.execute(
+                "UPDATE photos SET pair_group_id = ?1 WHERE id = ?2",
+                rusqlite::params![group_id, m.id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Re-derive ALL pairings in the database: clear every `pair_group_id`, then
+/// re-pair every same-stem group that satisfies the time-diff threshold. Called
+/// at startup (启动解配对) so pairings always reflect the current rule.
+pub fn reconcile_pairs_all(db: &mut Db, threshold_secs: i64) -> anyhow::Result<()> {
+    db.conn.execute("UPDATE photos SET pair_group_id = NULL", [])?;
+    let mut stmt = db.conn.prepare(
+        "SELECT id, folder_path, original_filename, capture_time FROM photos ORDER BY capture_time",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut groups: HashMap<(String, String), Vec<(i64, String)>> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let folder: String = row.get(1)?;
+        let name: String = row.get(2)?;
+        let ct: String = row.get(3)?;
+        let stem = std::path::Path::new(&name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        groups.entry((folder, stem)).or_default().push((id, ct));
+    }
+    for (_, members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        let times: Vec<Option<i64>> = members
+            .iter()
+            .map(|(_, ct)| crate::model::capture_time_epoch(ct))
+            .collect();
+        if times.iter().any(|t| t.is_none()) {
+            continue;
+        }
+        let (mn, mx) = (
+            times.iter().flatten().min().copied().unwrap_or(0),
+            times.iter().flatten().max().copied().unwrap_or(0),
+        );
+        if mx - mn > threshold_secs {
+            continue;
+        }
+        let group_id = members[0].0;
+        for (id, _) in &members {
             db.conn.execute(
                 "UPDATE photos SET pair_group_id = ?1 WHERE id = ?2",
                 rusqlite::params![group_id, id],
@@ -555,6 +624,23 @@ pub fn reconcile_pairs(db: &mut Db, folder_prefix: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// True when every member of a same-stem group has a parseable capture time and
+/// the span (max − min) is ≤ `threshold_secs`.
+fn within_pair_threshold(members: &[crate::model::PhotoListItem], threshold_secs: i64) -> bool {
+    let times: Vec<Option<i64>> = members
+        .iter()
+        .map(|p| crate::model::capture_time_epoch(&p.capture_time))
+        .collect();
+    if times.iter().any(|t| t.is_none()) {
+        return false;
+    }
+    let (mn, mx) = (
+        times.iter().flatten().min().copied().unwrap_or(0),
+        times.iter().flatten().max().copied().unwrap_or(0),
+    );
+    mx - mn <= threshold_secs
 }
 
 fn resolve_capture_time(ex: &exif::ExifData, item: &ScanItem) -> String {

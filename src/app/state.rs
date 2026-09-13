@@ -295,20 +295,19 @@ impl AppState {
     }
 
     /// Apply a status change to a photo and update the in-memory item.
-    /// Returns true if the status actually changed.
+    /// The DB write always happens (covers photos outside the current view,
+    /// e.g. pair-group members). Returns true if the status actually changed.
     pub fn set_status(&mut self, photo_id: i64, status: Status) -> anyhow::Result<bool> {
-        let changed = if let Some(p) = self.ws.items.iter_mut().find(|p| p.id == photo_id) {
-            if p.status != status {
-                p.status = status;
-                true
-            } else {
-                false
-            }
+        let in_view = if let Some(p) = self.ws.items.iter_mut().find(|p| p.id == photo_id) {
+            let c = p.status != status;
+            p.status = status;
+            c
         } else {
             false
         };
+        let rows = db::photos::set_status(&self.db, photo_id, status)?;
+        let changed = in_view || rows > 0;
         if changed {
-            db::photos::set_status(&self.db, photo_id, status)?;
             self.refresh_counts()?;
         }
         Ok(changed)
@@ -317,23 +316,38 @@ impl AppState {
     /// Apply a status to the currently displayed photo (Q/E/U). When
     /// `record_history` is true, a single-key operation is recorded on the undo
     /// stack (PRD 7.2). Returns true if the status actually changed.
+    ///
+    /// ③ Q 整组标记 (PRD 7.x): marking a paired RAW/JPG as 待删 (Delete) marks
+    /// the WHOLE pair group, so the JPG sibling never gets left behind.
     pub fn set_status_current(&mut self, status: Status, record_history: bool) -> anyhow::Result<bool> {
-        if let Some(p) = self.ws.current().cloned() {
-            if p.status == status {
-                return Ok(false);
-            }
-            if record_history {
+        let Some(p) = self.ws.current().cloned() else {
+            return Ok(false);
+        };
+        let targets: Vec<PhotoListItem> = if status == Status::Delete && p.pair_group_id.is_some() {
+            db::photos::list_items_by_pair_group(&self.db, p.pair_group_id.unwrap())?
+        } else {
+            vec![p.clone()]
+        };
+        let targets: Vec<PhotoListItem> = targets.into_iter().filter(|q| q.status != status).collect();
+        if targets.is_empty() {
+            return Ok(false);
+        }
+        if record_history {
+            for q in &targets {
                 self.push_undo(HistoryEntry {
-                    photo_id: p.id,
-                    old_status: p.status,
+                    photo_id: q.id,
+                    old_status: q.status,
                     new_status: status,
                 });
             }
-            self.set_status(p.id, status)?;
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        let mut any = false;
+        for q in &targets {
+            if self.set_status(q.id, status)? {
+                any = true;
+            }
+        }
+        Ok(any)
     }
 
     /// Apply a status to every selected photo. Batch operations do NOT enter the

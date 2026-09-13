@@ -328,6 +328,16 @@ pub struct AppConfig {
     /// "mark_delete" → "Q"). Missing entries use the built-in defaults
     /// (app::keybinds); reserved keys can never be bound.
     pub keybindings: std::collections::HashMap<String, String>,
+    /// RAW+JPG 配对时间差阈值（秒，1–30，默认 5，PRD 6.1.3）。
+    pub pair_time_threshold_secs: u64,
+}
+
+/// Parse a normalized capture time ("YYYY-MM-DD HH:MM:SS") into a Unix epoch
+/// second count, used for RAW+JPG 配对时间差判断.
+pub fn capture_time_epoch(s: &str) -> Option<i64> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|dt| dt.and_utc().timestamp())
 }
 
 impl Default for AppConfig {
@@ -358,6 +368,7 @@ impl Default for AppConfig {
             lr_install_path: String::new(),
             language: "zh".to_string(),
             keybindings: std::collections::HashMap::new(),
+            pair_time_threshold_secs: 5,
         }
     }
 }

@@ -430,7 +430,7 @@ pub fn run() -> anyhow::Result<()> {
     crate::paths::ensure_dirs()?;
 
     // 2. Database open + integrity + migration.
-    let (db, startup) = init_database()?;
+    let (mut db, startup) = init_database()?;
 
     // 3. Crash marker bookkeeping (skipped while the DB is corrupt — the
     // corruption dialog decides the fate of the database first).
@@ -441,6 +441,11 @@ pub fn run() -> anyhow::Result<()> {
     };
     if !startup.corruption_detected {
         db::workspace::mark_crash(&db)?;
+        // 启动解配对（PRD 6.1.3）：清空旧 pair_group_id 并按「时间差 ≤ 阈值」
+        // 全库重配对，保证配对始终符合当前规则（含用户改过阈值后）。
+        if let Err(e) = crate::app::copy::reconcile_pairs_all(&mut db, cfg.pair_time_threshold_secs as i64) {
+            log::error!("启动配对失败（忽略）: {e}");
+        }
     }
 
     // 4. Build the app.
@@ -1213,6 +1218,7 @@ impl KakaApp {
         self.import_scan_total.store(0, Ordering::SeqCst);
         let done = Arc::clone(&self.import_scan_done);
         let total = Arc::clone(&self.import_scan_total);
+        let pair_threshold_secs = self.state.config.pair_time_threshold_secs as i64;
         let (tx, rx) = channel();
         self.import_scan_rx = Some(rx);
         std::thread::spawn(move || {
@@ -1222,6 +1228,7 @@ impl KakaApp {
                     &mut db,
                     std::path::Path::new(&path),
                     recursive,
+                    pair_threshold_secs,
                     &mut |d, t| {
                         done.store(d, Ordering::SeqCst);
                         total.store(t, Ordering::SeqCst);
@@ -1353,6 +1360,7 @@ impl KakaApp {
         let recursive = options.recursive;
         let dedup = options.dedup;
         let clear_card = options.clear_card;
+        let pair_threshold_secs = options.pair_threshold_secs;
         // Number already finished this import (resume base), or 0 for a fresh run.
         let resume_base = resume_from.as_ref().map(|s| s.done).unwrap_or(0);
         let resume_flag = resume_from.is_some();
@@ -1413,6 +1421,7 @@ impl KakaApp {
                     recursive,
                     dedup,
                     clear_card,
+                    pair_threshold_secs,
                 };
                 let outcome = crate::app::copy::copy_mode_import(
                     &mut db,
