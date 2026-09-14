@@ -835,6 +835,55 @@ fn e_u_mark_whole_pair_group() {
     assert!(group_of(&app).iter().all(|p| p.pair_group_id.is_some()), "pair_group_id must survive Q (badge stays)");
 }
 
+#[test]
+fn search_expression_and_or_not() {
+    use kaka::app::state::eval_search;
+    use kaka::model::{PhotoListItem, Status};
+
+    let mk = |name: &str, status: Status, paired: bool| PhotoListItem {
+        id: 1,
+        original_filename: name.to_string(),
+        current_path: format!("C:/p/{name}"),
+        folder_path: "C:/p".to_string(),
+        status,
+        capture_time: "2026-01-01 00:00:00".to_string(),
+        file_size: 10,
+        thumb_hash: None,
+        camera_model: None,
+        lens_model: None,
+        iso: None,
+        aperture: None,
+        shutter_speed: None,
+        focal_length: None,
+        decode_failed: false,
+        preview_only: false,
+        pair_group_id: if paired { Some(7) } else { None },
+        rotation_override: 0,
+    };
+    let del = mk("DSC_0001.NEF", Status::Delete, true);
+    let rev = mk("IMG_0002.JPG", Status::Reviewed, false);
+
+    // @关键词（中文与英文均可用）。
+    assert!(eval_search(&del, "@待删"));
+    assert!(!eval_search(&del, "@已阅"));
+    assert!(eval_search(&rev, "@reviewed"));
+    // 或：||
+    assert!(eval_search(&del, "@待删||@已阅"));
+    assert!(eval_search(&rev, "@待删||@已阅"));
+    assert!(!eval_search(&rev, "@待删||@未处理"));
+    // 与：&& 与空白（隐式与）
+    assert!(eval_search(&del, "@待删 && DSC_0001"));
+    assert!(!eval_search(&del, "@待删 && IMG"));
+    assert!(eval_search(&del, "DSC 0001"), "whitespace = implicit AND");
+    assert!(!eval_search(&del, "DSC IMG"), "both substrings must match");
+    // 非：!
+    assert!(eval_search(&rev, "!@待删"));
+    assert!(!eval_search(&del, "!@待删"));
+    // 配对 / 丢失
+    assert!(eval_search(&del, "@配对"));
+    assert!(!eval_search(&rev, "@配对"));
+}
+
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
 /// preview referenced by JPEGInterchangeFormat/JPEGInterchangeFormatLength.
 /// This exercises the same path a TIFF-based RAW (NEF/ARW/CR2/DNG/ORF…) uses.

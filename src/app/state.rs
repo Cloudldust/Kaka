@@ -252,25 +252,10 @@ impl AppState {
         let filter = self.ws.filter.clone();
         let mut items = db::photos::list_items_filtered(&self.db, &folder, sort, &filter)?;
         let raw_search = self.ws.search.clone();
-        let search = raw_search.to_lowercase();
-        // @ 前缀语义 (UI 3.1): @delete/@reviewed/@untreated/@missing/@paired，
-        // 未知 @ 词回退为文件名包含匹配。
-        if let Some(after) = search.strip_prefix('@') {
-            let kw = after.trim();
-            match kw {
-                "delete" | "待删" => items.retain(|p| p.status == Status::Delete),
-                "reviewed" | "已阅" => items.retain(|p| p.status == Status::Reviewed),
-                "untreated" | "未处理" => items.retain(|p| p.status == Status::Untreated),
-                "missing" | "丢失" => items.retain(|p| p.is_missing()),
-                "paired" | "配对" => items.retain(|p| p.pair_group_id.is_some()),
-                _ => {
-                    if !kw.is_empty() {
-                        items.retain(|p| p.original_filename.to_lowercase().contains(kw));
-                    }
-                }
-            }
-        } else if !search.is_empty() {
-            items.retain(|p| p.original_filename.to_lowercase().contains(&search));
+        // 搜索表达式（UI 3.1）：支持 &&（与）/ ||（或）/ !（非）、空格=隐式与、
+        // @前缀（@待删/@已阅/@未处理/@丢失/@配对，中英均可用）。
+        if !raw_search.trim().is_empty() {
+            items.retain(|p| eval_search(p, &raw_search));
         }
         // P1-4 (PRD 6.1.3): RAW+JPG 配对合并显示为「同一张」——每组只保留一个代表
         // （优先 RAW），导航/总数按合并后计。
@@ -596,4 +581,52 @@ fn merge_pair_items(items: Vec<PhotoListItem>) -> Vec<PhotoListItem> {
         }
     }
     out
+}
+
+/// 搜索表达式求值 (UI 3.1)：`||` 为或、`&&` 为与、`!` 为非、空白 = 隐式与。
+/// 项可以是文件名子串（大小写不敏感）或 `@关键词`。示例：
+/// `@待删 && DSC_0001`、`@已阅 || @未处理`、`!@丢失`、`@待删 || @已阅 && @配对`。
+pub fn eval_search(p: &PhotoListItem, expr: &str) -> bool {
+    expr.split("||").any(|or_group| {
+        let mut ok = true;
+        let mut any_term = false;
+        for raw in or_group.split([' ', '\t']) {
+            for t in raw.split("&&") {
+                let t = t.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                any_term = true;
+                let (neg, core) = match t.strip_prefix('!') {
+                    Some(rest) => (true, rest.trim()),
+                    None => (false, t),
+                };
+                let r = eval_search_term(p, core);
+                if neg {
+                    ok = ok && !r;
+                } else {
+                    ok = ok && r;
+                }
+            }
+        }
+        !any_term || ok
+    })
+}
+
+/// 单个搜索项求值：`@关键词`（中英）或文件名子串；未知 @ 词回退为文件名包含。
+fn eval_search_term(p: &PhotoListItem, term: &str) -> bool {
+    let t = term.to_lowercase();
+    if let Some(kw) = t.strip_prefix('@') {
+        let kw = kw.trim();
+        match kw {
+            "delete" | "待删" => p.status == Status::Delete,
+            "reviewed" | "已阅" => p.status == Status::Reviewed,
+            "untreated" | "未处理" => p.status == Status::Untreated,
+            "missing" | "丢失" => p.is_missing(),
+            "paired" | "配对" => p.pair_group_id.is_some(),
+            _ => p.original_filename.to_lowercase().contains(kw),
+        }
+    } else {
+        p.original_filename.to_lowercase().contains(&t)
+    }
 }

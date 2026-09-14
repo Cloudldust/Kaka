@@ -116,7 +116,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut search)
                         .desired_width(200.0)
-                        .hint_text(t("搜索文件名 / @待删/已阅/未处理/丢失/配对", "Search file name / @delete/reviewed/untreated/missing/paired")),
+                        .hint_text(t("搜索文件名 / @待删/已阅/未处理/丢失/配对 · &&与 ||或 !非", "Search file name / @delete/reviewed/untreated/missing/paired · && AND || OR ! NOT")),
                 );
                 // UI 3.1: 输入即 300ms 防抖，回车立即触发。
                 if resp.changed() {
@@ -128,6 +128,44 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 if enter {
                     app.search_pending = None;
                     apply_search(app, &search);
+                }
+                // @ 自动补全：输入以 `@` 结尾且聚焦时，在搜索框下方列出可用关键词，点击即填入。
+                if resp.has_focus() && search.trim_end().ends_with('@') {
+                    let anchor = egui::pos2(resp.rect.left(), resp.rect.bottom() + 2.0);
+                    egui::Area::new(egui::Id::new("search_at_suggest"))
+                        .fixed_pos(anchor)
+                        .order(egui::Order::Foreground)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                let lang_zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
+                                let kws: [(&str, &str); 5] = [
+                                    ("待删", "delete"),
+                                    ("已阅", "reviewed"),
+                                    ("未处理", "untreated"),
+                                    ("丢失", "missing"),
+                                    ("配对", "paired"),
+                                ];
+                                for (zh, en) in kws {
+                                    let kw = if lang_zh { zh } else { en };
+                                    let label = format!("@{kw}");
+                                    if ui
+                                        .button(RichText::new(&label).size(13.0).color(theme::TEXT))
+                                        .clicked()
+                                    {
+                                        // 用 @关键词 替换末尾的 `@`。
+                                        let head = search.trim_end()[..search.trim_end().len() - 1].to_string();
+                                        let filled = if head.trim().is_empty() {
+                                            label.clone()
+                                        } else {
+                                            format!("{head} {label}")
+                                        };
+                                        app.state.ws.search = filled.clone();
+                                        app.search_pending = None;
+                                        apply_search(app, &filled);
+                                    }
+                                }
+                            });
+                        });
                 }
                 if !app.state.ws.search.is_empty() && ui.button("✕").clicked() {
                     app.search_pending = None;

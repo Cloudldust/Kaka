@@ -1534,12 +1534,20 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             });
             if apply {
                 app.state.ws.filter = app.filter_draft.clone();
-                let _ = app.state.reload_current();
+                // 联动：过滤里设置的 待删/已阅/未处理 状态，同步到搜索框的 @ 前缀。
+                app.state.ws.search = set_search_status(
+                    &app.state.ws.search,
+                    &filter_status_expr(&app.filter_draft.statuses),
+                );
+                app.state.ws.current_index = 0;
+                let _ = app.state.apply_view();
                 app.state.show_filter = false;
             }
             if clear {
                 app.filter_draft = crate::model::Filter::default();
                 app.state.ws.filter = crate::model::Filter::default();
+                // 清除过滤同时移除搜索框里的 @状态 前缀。
+                app.state.ws.search = set_search_status(&app.state.ws.search, "");
                 let _ = app.state.reload_current();
                 app.state.show_filter = false;
                 app.toast(ToastKind::Info, t("已清除过滤条件", "Filters cleared"));
@@ -1549,6 +1557,45 @@ fn filter_dialog(app: &mut KakaApp, ctx: &egui::Context) {
             }
         });
     ctx.request_repaint();
+}
+
+/// 把过滤器的状态集（0 未处理 / 1 待删 / 2 已阅）转成搜索 @ 表达式：
+/// 单个 → `@待删`；多个 → `@待删||@已阅`（或关系）；空 → ""。
+fn filter_status_expr(statuses: &[i64]) -> String {
+    let zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
+    let mut parts = Vec::new();
+    for s in statuses {
+        let kw = match *s {
+            0 => if zh { "@未处理" } else { "@untreated" },
+            1 => if zh { "@待删" } else { "@delete" },
+            2 => if zh { "@已阅" } else { "@reviewed" },
+            _ => continue,
+        };
+        parts.push(kw.to_string());
+    }
+    parts.join("||")
+}
+
+/// 在搜索表达式里替换 @状态 关键词：保留其它项（文件名/其它 @），移除旧的
+/// @待删/@已阅/@未处理（含英文与 `!` 前缀），末尾追加新的状态表达式。
+fn set_search_status(search: &str, status_expr: &str) -> String {
+    let status_kws: [&str; 6] = [
+        "@待删", "@已阅", "@未处理", "@delete", "@reviewed", "@untreated",
+    ];
+    let mut kept: Vec<String> = Vec::new();
+    for tok in search.split_whitespace() {
+        let bare = tok.trim_start_matches('!').to_lowercase();
+        if status_kws.contains(&bare.as_str()) {
+            continue;
+        }
+        kept.push(tok.to_string());
+    }
+    if status_expr.is_empty() {
+        kept.join(" ")
+    } else {
+        kept.push(status_expr.to_string());
+        kept.join(" ")
+    }
 }
 
 fn section_heading(ui: &mut egui::Ui, text: &str) {
