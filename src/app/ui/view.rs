@@ -12,6 +12,16 @@ pub fn render(app: &mut KakaApp, ui: &mut egui::Ui) {
 }
 
 fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
+    // UI 3.1: 搜索框 300ms 防抖——输入停顿后应用（回车则即时触发，见搜索框）。
+    let debounce_ready = app
+        .search_pending
+        .as_ref()
+        .map(|(_, at)| at.elapsed().as_millis() >= 300)
+        .unwrap_or(false);
+    if debounce_ready {
+        let text = app.search_pending.take().map(|(t, _)| t).unwrap_or_default();
+        apply_search(app, &text);
+    }
     let has_ws = app.state.folder_loaded && !app.state.ws.items.is_empty();
 
     // ---- Top bar ----
@@ -32,13 +42,70 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 ui.separator();
 
                 let path = app.state.ws.folder_path.clone();
-                let label = truncate_path(&path, 44);
-                ui.label(RichText::new(label).size(14.0).color(theme::TEXT))
-                    .on_hover_text(if path.is_empty() {
+                // UI 3.1-2: 路径下拉（最近 10 文件夹 / 浏览 / 复制完整路径）+
+                // Ctrl+L 内联编辑。
+                if app.path_edit_active {
+                    let mut edit = app.path_edit.clone();
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut edit)
+                            .desired_width(360.0)
+                            .hint_text(t("输入文件夹路径，回车打开", "Type a folder path, Enter to open")),
+                    );
+                    if resp.changed() {
+                        app.path_edit = edit;
+                    }
+                    let enter = resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if enter {
+                        let f = app.path_edit.clone();
+                        app.open_folder(&f);
+                        app.path_edit_active = false;
+                    } else if esc {
+                        app.path_edit_active = false;
+                    }
+                } else {
+                    let label = truncate_path(&path, 44);
+                    let fmt: String = if path.is_empty() {
                         t("未打开文件夹", "No folder open").to_string()
                     } else {
+                        label
+                    };
+                    let hover: String = if path.is_empty() {
+                        t("点击选择/浏览文件夹 · Ctrl+L 输入路径", "Click to pick / browse · Ctrl+L to type a path").to_string()
+                    } else {
                         path.clone()
-                    });
+                    };
+                    ui.menu_button(RichText::new(fmt).size(14.0).color(theme::TEXT), |ui| {
+                        for f in app.recent_folders().into_iter().take(10) {
+                            let fp = f.folder_path.clone();
+                            if ui.button(RichText::new(&fp).size(13.0)).clicked() {
+                                app.open_folder(&fp);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui
+                            .button(RichText::new(t("浏览文件夹…", "Browse for folder…")).size(13.0))
+                            .clicked()
+                        {
+                            if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                                let p = p.to_string_lossy().into_owned();
+                                app.open_folder(&p);
+                            }
+                            ui.close();
+                        }
+                        if ui
+                            .button(RichText::new(t("复制完整路径", "Copy full path")).size(13.0))
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(path.clone());
+                            ui.close();
+                        }
+                    })
+                    .response
+                    .on_hover_text(hover);
+                }
 
                 ui.separator();
                 sort_dropdown(app, ui);
@@ -49,14 +116,21 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut search)
                         .desired_width(200.0)
-                        .hint_text(t("搜索文件名 / @过滤条件", "Search filename / @filters")),
+                        .hint_text(t("搜索文件名 / @删除·已阅·未处理·丢失·配对", "Search file name / @delete·reviewed·untreated·missing·paired")),
                 );
+                // UI 3.1: 输入即 300ms 防抖，回车立即触发。
                 if resp.changed() {
-                    app.state.ws.search = search;
-                    let s = app.state.ws.search.clone();
-                    apply_search(app, &s);
+                    app.state.ws.search = search.clone();
+                    app.search_pending = Some((search.clone(), std::time::Instant::now()));
+                }
+                let enter = resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if enter {
+                    app.search_pending = None;
+                    apply_search(app, &search);
                 }
                 if !app.state.ws.search.is_empty() && ui.button("✕").clicked() {
+                    app.search_pending = None;
                     app.state.ws.search.clear();
                     apply_search(app, "");
                 }
@@ -138,6 +212,25 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
             );
             ui.painter().rect_filled(fill, 0.0, theme::BG);
             let green = processed >= total && total > 0;
+            // PRD 7.3: 筛选完成瞬时提示（processed == total，只弹一次）。
+            if green {
+                if !app.filter_completed_toasted {
+                    app.filter_completed_toasted = true;
+                    let deleted = app.state.ws.counts.deleted;
+                    let kept = total - deleted;
+                    let msg = match crate::i18n::lang() {
+                        crate::i18n::Lang::Zh => {
+                            format!("筛选完成！共 {total} 张，保留 {kept} 张，待删 {deleted} 张")
+                        }
+                        crate::i18n::Lang::En => format!(
+                            "Culling complete! {total} total, {kept} kept, {deleted} to delete"
+                        ),
+                    };
+                    app.toast(ToastKind::Success, msg);
+                }
+            } else {
+                app.filter_completed_toasted = false;
+            }
             let color = if green { theme::KEEP } else { theme::ACCENT };
             ui.painter().rect_filled(
                 egui::Rect::from_min_size(

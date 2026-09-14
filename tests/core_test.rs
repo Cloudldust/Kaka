@@ -798,8 +798,13 @@ fn e_u_mark_whole_pair_group() {
 
     let src = root.join("photos");
     std::fs::create_dir_all(&src).unwrap();
+    // 真 RAW（image 无法解码 → preview_only=true）+ 同 stem JPG。
+    std::fs::write(
+        src.join("DSC_0001.NEF"),
+        b"II*\x00\x08\x00\x00\x00 this is not a real NEF",
+    )
+    .unwrap();
     make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
-    make_jpeg(&src.join("DSC_0001.JPEG"), [4, 5, 6]);
     let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
     import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
     let folder = src.to_string_lossy();
@@ -807,21 +812,27 @@ fn e_u_mark_whole_pair_group() {
 
     let mut app = AppState::new(db, AppConfig::default());
     app.open_workspace(&folder, kaka::model::SortOrder::FilenameAsc).unwrap();
-    assert_eq!(app.ws.items.len(), 2);
-    assert!(app.ws.items.iter().all(|p| p.pair_group_id.is_some()), "both must be paired");
+    // P1-4: 配对合并显示为「同一张」——每组只保留一个代表（优先 RAW）。
+    assert_eq!(app.ws.items.len(), 1, "paired RAW+JPG shows as one merged item");
+    let rep = app.ws.items[0].clone();
+    assert!(rep.original_filename.to_uppercase().ends_with(".NEF"), "merged representative should be the RAW member; got {}", rep.original_filename);
+    assert!(rep.pair_group_id.is_some(), "representative keeps its pair_group_id");
+    let gid = rep.pair_group_id.unwrap();
+    let group_of = |app: &AppState| kaka::db::photos::list_items_by_pair_group(&app.db, gid).unwrap();
 
-    // E（已阅）对当前张 → 整组都变成已阅。
+    // E（已阅）对当前（合并）张 → 数据库里整组两张都变成已阅。
     app.set_status_current(Status::Reviewed, true).unwrap();
-    assert!(app.ws.items.iter().all(|p| p.status == Status::Reviewed), "E must mark the whole group");
+    assert_eq!(group_of(&app).len(), 2);
+    assert!(group_of(&app).iter().all(|p| p.status == Status::Reviewed), "E must mark the whole group");
 
     // U（重置）→ 整组回未处理。
     app.set_status_current(Status::Untreated, true).unwrap();
-    assert!(app.ws.items.iter().all(|p| p.status == Status::Untreated), "U must reset the whole group");
+    assert!(group_of(&app).iter().all(|p| p.status == Status::Untreated), "U must reset the whole group");
 
     // Q（待删）→ 整组待删，且 pair_group_id 保留（R+J 角标依赖它）。
     app.set_status_current(Status::Delete, true).unwrap();
-    assert!(app.ws.items.iter().all(|p| p.status == Status::Delete), "Q must mark the whole group");
-    assert!(app.ws.items.iter().all(|p| p.pair_group_id.is_some()), "pair_group_id must survive Q (badge stays)");
+    assert!(group_of(&app).iter().all(|p| p.status == Status::Delete), "Q must mark the whole group");
+    assert!(group_of(&app).iter().all(|p| p.pair_group_id.is_some()), "pair_group_id must survive Q (badge stays)");
 }
 
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG

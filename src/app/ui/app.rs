@@ -177,6 +177,15 @@ pub struct KakaApp {
     // Last workspace folder we enqueued missing thumbnails for.
     pub last_ws_folder: String,
 
+    // 顶栏路径编辑 (UI 3.1-2): Ctrl+L 聚焦可编辑路径，Enter 应用 / Esc 取消。
+    pub path_edit_active: bool,
+    pub path_edit: String,
+
+    // 筛选完成提示 (PRD 7.3): processed == total 时弹一次"筛选完成"Toast。
+    pub filter_completed_toasted: bool,
+    // 搜索框 300ms 防抖 (UI 3.1): (待应用文本, 最近输入时刻)。
+    pub search_pending: Option<(String, std::time::Instant)>,
+
     pub startup: StartupInfo,
 
     // Confirm dialog (generic).
@@ -368,6 +377,10 @@ impl KakaApp {
             needs_save: false,
             last_centered_id: None,
             last_ws_folder: String::new(),
+            path_edit_active: false,
+            path_edit: String::new(),
+            filter_completed_toasted: false,
+            search_pending: None,
             startup,
             confirm: None,
             delete_sel: std::collections::HashSet::new(),
@@ -745,6 +758,7 @@ impl KakaApp {
             || self.state.show_export
             || self.state.show_filter
             || self.state.show_db_corruption
+            || self.path_edit_active
             || self.confirm.is_some();
 
         // Esc chain: cancel digit jump → close dialog → exit fullscreen →
@@ -1027,6 +1041,12 @@ impl KakaApp {
         if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::I)
             || crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::O) {
             self.state.show_import = true;
+            return;
+        }
+        // UI 3.1-2: Ctrl+L 聚焦顶栏路径编辑（Enter 应用 / Esc 取消）。
+        if crate::app::keybinds::consume_key_exact(ctx, Modifiers::CTRL, Key::L) {
+            self.path_edit_active = true;
+            self.path_edit = self.state.ws.folder_path.clone();
             return;
         }
     }
@@ -1492,6 +1512,26 @@ impl KakaApp {
     /// Populate recent folders for the top-bar path dropdown.
     pub fn recent_folders(&self) -> Vec<Folder> {
         db::folders::recent_folders(&self.state.db).unwrap_or_default()
+    }
+
+    /// Switch the workspace to a folder (top-bar 路径下拉 / Ctrl+L 输入，UI 3.1-2).
+    pub fn open_folder(&mut self, folder: &str) {
+        let folder = folder.trim();
+        if folder.is_empty() {
+            return;
+        }
+        if !std::path::Path::new(folder).is_dir() {
+            self.toast(
+                ToastKind::Warning,
+                t("文件夹不存在：", "Folder does not exist: ").to_string() + folder,
+            );
+            return;
+        }
+        let sort = self.state.ws.sort;
+        if self.state.open_workspace(folder, sort).is_ok() {
+            self.needs_save = true;
+            self.last_centered_id = None;
+        }
     }
 
     /// Open the settings dialog, seeding the draft from the current config.

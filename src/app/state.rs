@@ -250,11 +250,31 @@ impl AppState {
         let folder = self.ws.folder_path.clone();
         let sort = self.ws.sort;
         let filter = self.ws.filter.clone();
-        let search = self.ws.search.clone().to_lowercase();
         let mut items = db::photos::list_items_filtered(&self.db, &folder, sort, &filter)?;
-        if !search.is_empty() {
+        let raw_search = self.ws.search.clone();
+        let search = raw_search.to_lowercase();
+        // @ 前缀语义 (UI 3.1): @delete/@reviewed/@untreated/@missing/@paired，
+        // 未知 @ 词回退为文件名包含匹配。
+        if let Some(after) = search.strip_prefix('@') {
+            let kw = after.trim();
+            match kw {
+                "delete" | "待删" => items.retain(|p| p.status == Status::Delete),
+                "reviewed" | "已阅" => items.retain(|p| p.status == Status::Reviewed),
+                "untreated" | "未处理" => items.retain(|p| p.status == Status::Untreated),
+                "missing" | "丢失" => items.retain(|p| p.is_missing()),
+                "paired" | "配对" => items.retain(|p| p.pair_group_id.is_some()),
+                _ => {
+                    if !kw.is_empty() {
+                        items.retain(|p| p.original_filename.to_lowercase().contains(kw));
+                    }
+                }
+            }
+        } else if !search.is_empty() {
             items.retain(|p| p.original_filename.to_lowercase().contains(&search));
         }
+        // P1-4 (PRD 6.1.3): RAW+JPG 配对合并显示为「同一张」——每组只保留一个代表
+        // （优先 RAW），导航/总数按合并后计。
+        items = merge_pair_items(items);
         // Drop selection entries for photos no longer visible (PRD 7.8).
         let visible: HashSet<i64> = items.iter().map(|p| p.id).collect();
         self.ws.selection.retain(|id| visible.contains(id));
@@ -529,4 +549,43 @@ impl AppState {
     pub fn histogram_for(&self, photo_id: i64) -> Option<&crate::io::histogram::Histogram> {
         self.histograms.get(&photo_id)
     }
+}
+
+/// P1-4 (PRD 6.1.3): collapse a paired RAW+JPG into a single visible item so
+/// the thumbnail strip / preview / navigation treat them as「同一张」. Each pair
+/// group keeps ONE representative — the RAW member (image-crate non-decodable,
+/// `preview_only`) when present, else the first member in sort order. Unpaired
+/// photos pass through unchanged; sort order is preserved.
+fn merge_pair_items(items: Vec<PhotoListItem>) -> Vec<PhotoListItem> {
+    use std::collections::HashMap;
+    let is_raw_name = |name: &str| crate::io::format::is_raw(std::path::Path::new(name));
+    let mut chosen: HashMap<i64, usize> = HashMap::new(); // pair_group_id → index
+    for (i, it) in items.iter().enumerate() {
+        if let Some(g) = it.pair_group_id {
+            match chosen.get(&g) {
+                None => {
+                    chosen.insert(g, i);
+                }
+                Some(&prev) => {
+                    // 优先 RAW 成员（按扩展名识别）作为代表。
+                    if is_raw_name(&it.original_filename)
+                        && !is_raw_name(&items[prev].original_filename)
+                    {
+                        chosen.insert(g, i);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (i, it) in items.into_iter().enumerate() {
+        let is_rep = match it.pair_group_id {
+            Some(g) => chosen.get(&g) == Some(&i),
+            None => true,
+        };
+        if is_rep {
+            out.push(it);
+        }
+    }
+    out
 }
