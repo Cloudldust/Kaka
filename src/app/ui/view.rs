@@ -132,11 +132,17 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 }
                 // @ 自动补全：仅记录搜索框位置，候选窗口在全部面板渲染完后统一绘制
                 // （render_top_bottom_panels 末尾），确保浮层在最上层、可点击。
-                app.search_suggest_rect = if resp.has_focus() && search.trim_end().ends_with('@') {
-                    Some(resp.rect)
+                // 注意：不能只依赖 has_focus()——egui 按钮按下会抢走焦点，导致
+                // 下一帧候选消失、点击落空；所以只要文本以 @ 结尾就保持打开，
+                // 点选后才关闭。
+                let ends_at = search.trim_end().ends_with('@');
+                if ends_at {
+                    if resp.has_focus() || app.search_suggest_rect.is_some() {
+                        app.search_suggest_rect = Some(resp.rect);
+                    }
                 } else {
-                    None
-                };
+                    app.search_suggest_rect = None;
+                }
                 if !app.state.ws.search.is_empty() && ui.button("✕").clicked() {
                     app.search_pending = None;
                     app.state.ws.search.clear();
