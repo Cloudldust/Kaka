@@ -137,9 +137,14 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 // 点选后才关闭。
                 let ends_at = search.trim_end().ends_with('@');
                 if ends_at {
-                    if resp.has_focus() || app.search_suggest_rect.is_some() {
-                        app.search_suggest_rect = Some(resp.rect);
-                    }
+                    // 只要文本以 @ 结尾就保持候选打开（不依赖 has_focus——按钮
+                    // 按下会抢焦点，且第二次输入时聚焦状态可能未恢复）。
+                    app.search_suggest_rect = Some(resp.rect);
+                    log::debug!(
+                        "search @suggest: shown (text='{}', focused={})",
+                        search,
+                        resp.has_focus()
+                    );
                 } else {
                     app.search_suggest_rect = None;
                 }
@@ -316,6 +321,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
     // ---- @ 自动补全候选（在所有面板渲染完后绘制，确保浮层在最上层可点击）----
     if let Some(rect) = app.search_suggest_rect {
         let anchor = egui::pos2(rect.left(), rect.bottom() + 2.0);
+        log::debug!("search @suggest: drawing window at {anchor:?}");
         egui::Window::new("")
             .id(egui::Id::new("search_at_suggest"))
             .title_bar(false)
@@ -339,6 +345,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                         .button(RichText::new(&label).size(13.0).color(theme::TEXT))
                         .clicked()
                     {
+                        log::info!("search @suggest: clicked {label}");
                         // 用 @关键词 替换末尾的 `@`。
                         let cur = app.state.ws.search.clone();
                         let trimmed = cur.trim_end();
