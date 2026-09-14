@@ -116,7 +116,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut search)
                         .desired_width(200.0)
-                        .hint_text(t("搜索文件名 / @删除·已阅·未处理·丢失·配对", "Search file name / @delete·reviewed·untreated·missing·paired")),
+                        .hint_text(t("搜索文件名 / @待删/已阅/未处理/丢失/配对", "Search file name / @delete/reviewed/untreated/missing/paired")),
                 );
                 // UI 3.1: 输入即 300ms 防抖，回车立即触发。
                 if resp.changed() {

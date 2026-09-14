@@ -998,7 +998,7 @@ impl KakaApp {
         if self.fire(ctx, "mark_delete") {
             let changed = self.state.set_status_current(Status::Delete, true).unwrap_or(false);
             self.needs_save = true;
-            if changed && self.advance(1) {
+            if changed && self.advance(1) && !self.state.is_filter_complete() {
                 self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
             }
             return;
@@ -1006,7 +1006,7 @@ impl KakaApp {
         if self.fire(ctx, "mark_reviewed") {
             let changed = self.state.set_status_current(Status::Reviewed, true).unwrap_or(false);
             self.needs_save = true;
-            if changed && self.advance(1) {
+            if changed && self.advance(1) && !self.state.is_filter_complete() {
                 self.toast(ToastKind::Warning, t("已是最后一张", "Already at the last photo"));
             }
             return;

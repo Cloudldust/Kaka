@@ -7,7 +7,6 @@ use crate::model::{PhotoListItem, SortOrder, Status};
 use crate::db;
 use chrono::Datelike;
 use eframe::egui::{self, Align2, RichText};
-use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
@@ -2248,19 +2247,69 @@ fn import_scan_cell(
     }
 }
 
+/// 待删框的一个「删除单元」：未配对单张 = 1 单元；RAW+JPG 配对组 = 1 单元
+/// （代表用于显示，整组一起恢复 / 一起删除，避免只恢复/只删其中一张）。
+struct DeleteUnit {
+    rep: PhotoListItem,
+    member_ids: Vec<i64>,
+    member_paths: Vec<String>,
+    member_sizes: Vec<i64>,
+}
+
+/// 把 status=1 的照片折叠为删除单元：每个配对组只保留一个代表（按扩展名优先
+/// RAW），组成员（含未标 status=1 的旧数据 JPG）通过 pair_group_id 全量纳入，
+/// 保证恢复/删除始终作用于整组。
+fn build_delete_units(db: &crate::db::Db, deleted: &[PhotoListItem]) -> Vec<DeleteUnit> {
+    let mut seen_groups: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut units: Vec<DeleteUnit> = Vec::new();
+    for p in deleted {
+        if let Some(g) = p.pair_group_id {
+            if !seen_groups.insert(g) {
+                continue;
+            }
+            let members = db::photos::list_items_by_pair_group(db, g).unwrap_or_default();
+            if members.is_empty() {
+                continue;
+            }
+            let rep = members
+                .iter()
+                .find(|m| crate::io::format::is_raw(std::path::Path::new(&m.original_filename)))
+                .cloned()
+                .unwrap_or_else(|| members[0].clone());
+            units.push(DeleteUnit {
+                rep,
+                member_ids: members.iter().map(|m| m.id).collect(),
+                member_paths: members.iter().map(|m| m.current_path.clone()).collect(),
+                member_sizes: members.iter().map(|m| m.file_size).collect(),
+            });
+        } else {
+            units.push(DeleteUnit {
+                rep: p.clone(),
+                member_ids: vec![p.id],
+                member_paths: vec![p.current_path.clone()],
+                member_sizes: vec![p.file_size],
+            });
+        }
+    }
+    units
+}
+
 fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
-    // All pending-delete photos of the current workspace (status = 1), in
-    // capture-time order so Shift+click range selection is stable (PRD 8.1).
+    // All pending-delete photos of the current workspace (status = 1), folded
+    // into 删除单元 (RAW+JPG 合并为一组) so selection/restore/delete are 整组.
     let folder = app.state.ws.folder_path.clone();
     let items = db::photos::list_items_in_folder(&app.state.db, &folder, SortOrder::CaptureTimeAsc)
         .unwrap_or_default();
     let deleted: Vec<_> = items.into_iter().filter(|p| p.status == Status::Delete).collect();
+    let units = build_delete_units(&app.state.db, &deleted);
+    let unit_ids: Vec<i64> = units.iter().map(|u| u.rep.id).collect();
+    let unit_files: usize = units.iter().map(|u| u.member_ids.len()).sum();
 
     // Ctrl+A / Ctrl+Shift+A act on the delete-box grid while it is open
     // (PRD 8.1). Global shortcuts are already suppressed by the modal guard.
-    if !deleted.is_empty() {
+    if !units.is_empty() {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A)) {
-            app.delete_sel = deleted.iter().map(|p| p.id).collect();
+            app.delete_sel = unit_ids.iter().copied().collect();
         }
         if ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::A)
@@ -2280,37 +2329,20 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(dialog_frame())
         .show(ctx, |ui| {
-            let n = deleted.len();
-            let groups = deleted
-                .iter()
-                .filter_map(|p| p.pair_group_id)
-                .collect::<HashSet<i64>>()
-                .len();
+            let n = unit_files;
+            let groups = units.iter().filter(|u| u.member_ids.len() > 1).count();
             let title = match i18n::lang() {
-                i18n::Lang::Zh => format!("待删照片（{n}张）"),
-                i18n::Lang::En => format!("Photos to delete ({n})"),
+                i18n::Lang::Zh => format!("待删照片（{n} 张 / {} 组）", groups),
+                i18n::Lang::En => format!("Photos to delete ({n} photo(s) / {groups} group(s))"),
             };
             ui.label(RichText::new(title).heading().color(theme::TEXT));
-            if groups > 0 {
-                ui.label(
-                    RichText::new(format!(
-                        "{}",
-                        match i18n::lang() {
-                            i18n::Lang::Zh => format!("包含 {groups} 组 RAW+JPG"),
-                            i18n::Lang::En => format!("includes {groups} RAW+JPG group(s)"),
-                        }
-                    ))
-                    .size(12.0)
-                    .color(theme::TEXT_WEAK),
-                );
-            }
             ui.label(RichText::new(
-                t("单击选中 · Ctrl+单击切换 · Shift+单击范围选 · 双击在预览区查看 · 最终删除会移入回收站（可恢复）并清除数据库记录",
-                  "Click to select · Ctrl+click toggle · Shift+click range · double-click to preview · final delete moves files to the recycle bin (recoverable) and removes DB records"))
+                t("配对组（RAW+JPG）合并显示为一张，选中/恢复/删除均作用于整组",
+                  "Paired RAW+JPG show as one; select/restore/delete act on the whole group"))
                 .size(12.0).color(theme::TEXT_WEAK));
             ui.separator();
 
-            if deleted.is_empty() {
+            if units.is_empty() {
                 // Flow-based empty hint. A full-rect `centered_and_justified`
                 // here consumes the whole remaining space and pushes the
                 // separator/summary/action bar out of the window — after
@@ -2327,7 +2359,7 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
                 // be pushed out of the window.
                 let reserved = 110.0f32;
                 let mods = ui.input(|i| i.modifiers);
-                let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
+                let ids: Vec<i64> = unit_ids.clone();
                 let cell_w = 150.0f32;
                 let cols = ((ui.available_width() / (cell_w + 10.0)).floor() as usize).clamp(3, 8);
                 egui::ScrollArea::vertical()
@@ -2337,16 +2369,16 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
                         .spacing([10.0, 10.0])
                         .num_columns(cols)
                         .show(ui, |ui| {
-                            for (idx, p) in deleted.iter().enumerate() {
-                                let selected = app.delete_sel.contains(&p.id);
-                                let resp = delete_cell(ui, app, p, selected);
+                            for (idx, unit) in units.iter().enumerate() {
+                                let selected = app.delete_sel.contains(&unit.rep.id);
+                                let resp = delete_cell(ui, app, &unit.rep, selected);
                                 if resp.clicked() {
-                                    delete_select_click(app, &ids, idx, p.id, mods.ctrl, mods.shift);
+                                    delete_select_click(app, &ids, idx, unit.rep.id, mods.ctrl, mods.shift);
                                 }
                                 if resp.double_clicked() {
                                     // Preview stays live behind the modal (UI spec 5.2).
                                     if let Some(pos) =
-                                        app.state.ws.items.iter().position(|w| w.id == p.id)
+                                        app.state.ws.items.iter().position(|w| w.id == unit.rep.id)
                                     {
                                         app.state.ws.current_index = pos;
                                     }
@@ -2360,9 +2392,9 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
             }
 
             ui.separator();
-            let n = deleted.len();
+            let n = unit_files;
             let sel = app.delete_sel.len();
-            let freed = deleted.iter().map(|p| p.file_size).sum::<i64>();
+            let freed = units.iter().map(|u| u.member_sizes.iter().sum::<i64>()).sum::<i64>();
             ui.horizontal(|ui| {
                 let summary = match i18n::lang() {
                     i18n::Lang::Zh => format!("选中 {sel} 张 · 共 {n} 张 · 预计释放空间 {}",
@@ -2375,23 +2407,26 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if n > 0 {
-                    // 恢复选中 (PRD 8.2): only enabled with a selection.
+                    // 恢复选中 (PRD 8.2): only enabled with a selection. 整组恢复——选中的
+                    // 单元（配对组）会连同其所有成员一起恢复。
                     let restore_btn = egui::Button::new(
                         RichText::new(format!("{} ({sel})", t("恢复选中", "Restore selected"))).color(theme::KEEP),
                     );
                     if ui.add_enabled(sel > 0, restore_btn).clicked() {
-                        let ids: Vec<i64> = deleted
-                            .iter()
-                            .filter(|p| app.delete_sel.contains(&p.id))
-                            .map(|p| p.id)
-                            .collect();
+                        let mut ids: Vec<i64> = Vec::new();
+                        for u in &units {
+                            if app.delete_sel.contains(&u.rep.id) {
+                                ids.extend(u.member_ids.iter().copied());
+                            }
+                        }
+                        let restored = ids.len();
                         let _ = db::photos::set_status_batch(&app.state.db, &ids, Status::Untreated);
                         let _ = app.state.reload_current();
                         app.delete_sel.clear();
                         app.delete_anchor = None;
                         let msg = match i18n::lang() {
-                            i18n::Lang::Zh => format!("已恢复 {sel} 张为未处理"),
-                            i18n::Lang::En => format!("Restored {sel} photo(s) to unprocessed"),
+                            i18n::Lang::Zh => format!("已恢复 {restored} 张为未处理（含同组 JPG）"),
+                            i18n::Lang::En => format!("Restored {restored} photo(s) to unprocessed (incl. group JPGs)"),
                         };
                         app.toast(ToastKind::Success, msg);
                         app.needs_save = true;
@@ -2403,7 +2438,10 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
                         ))
                         .clicked()
                     {
-                        let ids: Vec<i64> = deleted.iter().map(|p| p.id).collect();
+                        let ids: Vec<i64> = units
+                            .iter()
+                            .flat_map(|u| u.member_ids.iter().copied())
+                            .collect();
                         let _ = db::photos::set_status_batch(&app.state.db, &ids, Status::Untreated);
                         let _ = app.state.reload_current();
                         app.delete_sel.clear();
@@ -2437,33 +2475,17 @@ fn delete_box(app: &mut KakaApp, ctx: &egui::Context) {
     }
 
     if recycle {
-        // ④ 整组删除：status=1 的照片展开到整个 RAW+JPG 配对组（漏删同组 JPG
-        // 的问题），并按「组 / 张」计数。配对组（≥2 张同组）计 1 组，未配对
-        // 单张计 1 组。
-        let mut targets: Vec<PhotoListItem> = Vec::new();
-        let mut seen: HashSet<i64> = HashSet::new();
-        for p in &deleted {
-            if let Some(g) = p.pair_group_id {
-                if let Ok(members) = db::photos::list_items_by_pair_group(&app.state.db, g) {
-                    for m in members {
-                        if seen.insert(m.id) {
-                            targets.push(m);
-                        }
-                    }
-                }
-            } else if seen.insert(p.id) {
-                targets.push(p.clone());
-            }
-        }
-        let pair_groups: HashSet<i64> = deleted.iter().filter_map(|p| p.pair_group_id).collect();
-        let singles = deleted.iter().filter(|p| p.pair_group_id.is_none()).count();
-        let group_count = pair_groups.len() + singles;
-        let file_count = targets.len();
-        let paths: Vec<std::path::PathBuf> = targets
+        // 整组删除：每个删除单元（配对组或单张）作为一个整体移入回收站。
+        let file_count = unit_files;
+        let group_count = units.len();
+        let paths: Vec<std::path::PathBuf> = units
             .iter()
-            .map(|p| std::path::PathBuf::from(&p.current_path))
+            .flat_map(|u| u.member_paths.iter().map(std::path::PathBuf::from))
             .collect();
-        let ids: Vec<i64> = targets.iter().map(|p| p.id).collect();
+        let ids: Vec<i64> = units
+            .iter()
+            .flat_map(|u| u.member_ids.iter().copied())
+            .collect();
         let group_count_c = group_count;
         let file_count_c = file_count;
         app.confirm = Some(ConfirmDialog {

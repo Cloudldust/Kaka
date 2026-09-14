@@ -522,6 +522,14 @@ impl AppState {
         Ok(())
     }
 
+    /// True when every visible photo has been processed (待删 + 已阅 == 总数，
+    /// PRD 7.3 筛选终局). Used to suppress the boundary toast when the last
+    /// photo's Q/E just completed the filter.
+    pub fn is_filter_complete(&self) -> bool {
+        let c = &self.ws.counts;
+        c.total > 0 && (c.deleted + c.reviewed) >= c.total
+    }
+
     /// Close the workspace and persist nothing (called on folder switch).
     pub fn close_workspace(&mut self) {
         self.ws = Workspace::empty();
