@@ -145,7 +145,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                     }
                     app.search_suggest_rect = None;
                 }
-                if !app.state.ws.search.is_empty() && ui.button("✕").clicked() {
+                if !app.state.ws.search.is_empty() && ui.button("X").clicked() {
                     app.search_pending = None;
                     app.state.ws.search.clear();
                     apply_search(app, "");
@@ -257,7 +257,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                         }
                     }
                     if ui
-                        .button(RichText::new("✕").size(13.0).color(theme::TEXT_WEAK))
+                        .button(RichText::new("X").size(13.0).color(theme::TEXT_WEAK))
                         .on_hover_text(t("关闭补全", "Dismiss suggestions"))
                         .clicked()
                     {
