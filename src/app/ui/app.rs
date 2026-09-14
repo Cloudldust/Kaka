@@ -185,6 +185,8 @@ pub struct KakaApp {
     pub filter_completed_toasted: bool,
     // 搜索框 300ms 防抖 (UI 3.1): (待应用文本, 最近输入时刻)。
     pub search_pending: Option<(String, std::time::Instant)>,
+    // @ 自动补全：搜索框当前屏幕矩形（候选窗口在面板渲染完后绘制，避免被遮挡）。
+    pub search_suggest_rect: Option<egui::Rect>,
 
     pub startup: StartupInfo,
 
@@ -381,6 +383,7 @@ impl KakaApp {
             path_edit: String::new(),
             filter_completed_toasted: false,
             search_pending: None,
+            search_suggest_rect: None,
             startup,
             confirm: None,
             delete_sel: std::collections::HashSet::new(),

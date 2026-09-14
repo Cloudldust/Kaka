@@ -115,6 +115,7 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 let mut search = app.state.ws.search.clone();
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut search)
+                        .id(egui::Id::new("search_box"))
                         .desired_width(200.0)
                         .hint_text(t("搜索文件名 / @待删/已阅/未处理/丢失/配对 · &&与 ||或 !非", "Search file name / @delete/reviewed/untreated/missing/paired · && AND || OR ! NOT")),
                 );
@@ -129,56 +130,13 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                     app.search_pending = None;
                     apply_search(app, &search);
                 }
-                // @ 自动补全：输入以 `@` 结尾且聚焦时，在搜索框下方列出可用关键词，点击即填入。
-                if resp.has_focus() && search.trim_end().ends_with('@') {
-                    let anchor = egui::pos2(resp.rect.left(), resp.rect.bottom() + 2.0);
-                    egui::Window::new("")
-                        .id(egui::Id::new("search_at_suggest"))
-                        .title_bar(false)
-                        .resizable(false)
-                        .collapsible(false)
-                        .fixed_pos(anchor)
-                        .order(egui::Order::Foreground)
-                        .show(ui.ctx(), |ui| {
-                            let lang_zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
-                            let kws: [(&str, &str); 5] = [
-                                ("待删", "delete"),
-                                ("已阅", "reviewed"),
-                                ("未处理", "untreated"),
-                                ("丢失", "missing"),
-                                ("配对", "paired"),
-                            ];
-                            for (zh, en) in kws {
-                                let kw = if lang_zh { zh } else { en };
-                                let label = format!("@{kw}");
-                                if ui
-                                    .button(RichText::new(&label).size(13.0).color(theme::TEXT))
-                                    .clicked()
-                                {
-                                    // 用 @关键词 替换末尾的 `@`。
-                                    let cur = app.state.ws.search.clone();
-                                    let trimmed = cur.trim_end();
-                                    let head = if trimmed.ends_with('@') && trimmed.len() > 1 {
-                                        trimmed[..trimmed.len() - 1].to_string()
-                                    } else {
-                                        String::new()
-                                    };
-                                    let filled = if head.trim().is_empty() {
-                                        label.clone()
-                                    } else {
-                                        format!("{head} {label}")
-                                    };
-                                    app.state.ws.search = filled.clone();
-                                    app.search_pending = None;
-                                    // 让 TextEdit 失焦，强制它重新读取绑定值（聚焦时
-                                    // egui 保留内部文本，外部改动不会刷新）。
-                                    resp.surrender_focus();
-                                    apply_search(app, &filled);
-                                    ui.close();
-                                }
-                            }
-                        });
-                }
+                // @ 自动补全：仅记录搜索框位置，候选窗口在全部面板渲染完后统一绘制
+                // （render_top_bottom_panels 末尾），确保浮层在最上层、可点击。
+                app.search_suggest_rect = if resp.has_focus() && search.trim_end().ends_with('@') {
+                    Some(resp.rect)
+                } else {
+                    None
+                };
                 if !app.state.ws.search.is_empty() && ui.button("✕").clicked() {
                     app.search_pending = None;
                     app.state.ws.search.clear();
@@ -348,6 +306,57 @@ fn render_top_bottom_panels(app: &mut KakaApp, ui: &mut egui::Ui) {
                 render_preview(app, ui);
             }
         });
+
+    // ---- @ 自动补全候选（在所有面板渲染完后绘制，确保浮层在最上层可点击）----
+    if let Some(rect) = app.search_suggest_rect {
+        let anchor = egui::pos2(rect.left(), rect.bottom() + 2.0);
+        egui::Window::new("")
+            .id(egui::Id::new("search_at_suggest"))
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .fixed_pos(anchor)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                let lang_zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
+                let kws: [(&str, &str); 5] = [
+                    ("待删", "delete"),
+                    ("已阅", "reviewed"),
+                    ("未处理", "untreated"),
+                    ("丢失", "missing"),
+                    ("配对", "paired"),
+                ];
+                for (zh, en) in kws {
+                    let kw = if lang_zh { zh } else { en };
+                    let label = format!("@{kw}");
+                    if ui
+                        .button(RichText::new(&label).size(13.0).color(theme::TEXT))
+                        .clicked()
+                    {
+                        // 用 @关键词 替换末尾的 `@`。
+                        let cur = app.state.ws.search.clone();
+                        let trimmed = cur.trim_end();
+                        let head = if trimmed.ends_with('@') && trimmed.len() > 1 {
+                            trimmed[..trimmed.len() - 1].to_string()
+                        } else {
+                            String::new()
+                        };
+                        let filled = if head.trim().is_empty() {
+                            label.clone()
+                        } else {
+                            format!("{head} {label}")
+                        };
+                        app.state.ws.search = filled.clone();
+                        app.search_pending = None;
+                        app.search_suggest_rect = None;
+                        // 让搜索框失焦，强制重读绑定值（聚焦的 TextEdit 保留内部文本）。
+                        ui.ctx().memory_mut(|m| m.surrender_focus(egui::Id::new("search_box")));
+                        apply_search(app, &filled);
+                        ui.close();
+                    }
+                }
+            });
+    }
 }
 
 fn frame_fill(fill: egui::Color32) -> egui::Frame {
