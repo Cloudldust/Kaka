@@ -317,13 +317,13 @@ impl AppState {
     /// `record_history` is true, a single-key operation is recorded on the undo
     /// stack (PRD 7.2). Returns true if the status actually changed.
     ///
-    /// ③ Q 整组标记 (PRD 7.x): marking a paired RAW/JPG as 待删 (Delete) marks
-    /// the WHOLE pair group, so the JPG sibling never gets left behind.
+    /// ③ 整组标记 (PRD 7.x): 对配对组（RAW+JPG）按 Q/E/U 会把状态应用到
+    /// 整组（Q 待删 / E 已阅 / U 重置），JPG 兄弟不会漏标。
     pub fn set_status_current(&mut self, status: Status, record_history: bool) -> anyhow::Result<bool> {
         let Some(p) = self.ws.current().cloned() else {
             return Ok(false);
         };
-        let targets: Vec<PhotoListItem> = if status == Status::Delete && p.pair_group_id.is_some() {
+        let targets: Vec<PhotoListItem> = if p.pair_group_id.is_some() {
             db::photos::list_items_by_pair_group(&self.db, p.pair_group_id.unwrap())?
         } else {
             vec![p.clone()]

@@ -543,7 +543,8 @@ fn thumb_widget(
         }
         Status::Untreated => {}
     }
-    if item.pair_group_id.is_some() && item.status != Status::Delete {
+    // R+J 角标始终显示（含待删状态），这样整组标记后仍能看出它属于配对组。
+    if item.pair_group_id.is_some() {
         painter.text(
             egui::pos2(rect.max.x - 28.0, rect.max.y - 4.0),
             Align2::RIGHT_BOTTOM,

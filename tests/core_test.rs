@@ -785,6 +785,45 @@ fn prescan_pair_respects_time_threshold() {
     assert!(items.iter().all(|i| i.pair_group.is_some()), "within 30s should pair in prescan");
 }
 
+#[test]
+fn e_u_mark_whole_pair_group() {
+    use kaka::app::state::AppState;
+    use kaka::model::{AppConfig, Status};
+
+    let root = temp_root();
+    let db_path = root.join("eu.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let src = root.join("photos");
+    std::fs::create_dir_all(&src).unwrap();
+    make_jpeg(&src.join("DSC_0001.JPG"), [1, 2, 3]);
+    make_jpeg(&src.join("DSC_0001.JPEG"), [4, 5, 6]);
+    let mut prog = |_p: &str, _d: usize, _t: usize, _n: &str| -> bool { true };
+    import::add_mode_import(&mut db, &src, true, true, &mut prog, None).unwrap();
+    let folder = src.to_string_lossy();
+    kaka::app::copy::reconcile_pairs(&mut db, &folder, 5).unwrap();
+
+    let mut app = AppState::new(db, AppConfig::default());
+    app.open_workspace(&folder, kaka::model::SortOrder::FilenameAsc).unwrap();
+    assert_eq!(app.ws.items.len(), 2);
+    assert!(app.ws.items.iter().all(|p| p.pair_group_id.is_some()), "both must be paired");
+
+    // E（已阅）对当前张 → 整组都变成已阅。
+    app.set_status_current(Status::Reviewed, true).unwrap();
+    assert!(app.ws.items.iter().all(|p| p.status == Status::Reviewed), "E must mark the whole group");
+
+    // U（重置）→ 整组回未处理。
+    app.set_status_current(Status::Untreated, true).unwrap();
+    assert!(app.ws.items.iter().all(|p| p.status == Status::Untreated), "U must reset the whole group");
+
+    // Q（待删）→ 整组待删，且 pair_group_id 保留（R+J 角标依赖它）。
+    app.set_status_current(Status::Delete, true).unwrap();
+    assert!(app.ws.items.iter().all(|p| p.status == Status::Delete), "Q must mark the whole group");
+    assert!(app.ws.items.iter().all(|p| p.pair_group_id.is_some()), "pair_group_id must survive Q (badge stays)");
+}
+
 /// Build a minimal little-endian TIFF whose IFD0 carries a single embedded JPEG
 /// preview referenced by JPEGInterchangeFormat/JPEGInterchangeFormatLength.
 /// This exercises the same path a TIFF-based RAW (NEF/ARW/CR2/DNG/ORF…) uses.
