@@ -371,34 +371,120 @@ pub fn lr_install_path(custom: &str) -> Option<PathBuf> {
 
 /// 12.4 / 13.1: launch Lightroom Classic with every kept photo path as an import
 /// argument, and write a temporary .lrtemplate placeholder file listing the kept
-/// paths. Returns the number of photos sent.
-pub fn send_to_lightroom(db: &Db, folder: &str, lr_exe: &Path) -> anyhow::Result<usize> {
-    let items = db::photos::list_items_in_folder(db, folder, SortOrder::CaptureTimeAsc)?;
-    let kept: Vec<PhotoListItem> = items
-        .into_iter()
-        .filter(|p| p.status != Status::Delete)
-        .collect();
+/// paths. Runs on a background thread so the UI never blocks; the outcome
+/// (成功 / 15s 超时 / 失败, PRD 13.2) is reported over the channel.
+pub fn launch_lightroom_async(
+    folder: &str,
+    lr_exe: &std::path::Path,
+    tx: std::sync::mpsc::Sender<LrLaunchResult>,
+) {
+    let folder = folder.to_string();
+    let lr_exe = lr_exe.to_path_buf();
+    std::thread::spawn(move || {
+        let res = (|| -> anyhow::Result<LrLaunchResult> {
+            let db = Db::open_default().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let items = db::photos::list_items_in_folder(&db, &folder, SortOrder::CaptureTimeAsc)?;
+            let kept: Vec<PhotoListItem> = items
+                .into_iter()
+                .filter(|p| p.status != Status::Delete)
+                .collect();
 
-    if kept.is_empty() {
-        anyhow::bail!("{}", crate::i18n::t("工作区没有保留照片", "No kept photos in this workspace"));
+            if kept.is_empty() {
+                anyhow::bail!(
+                    "{}",
+                    crate::i18n::t("工作区没有保留照片", "No kept photos in this workspace")
+                );
+            }
+
+            // Write the .lrtemplate placeholder list.
+            let tmp = std::env::temp_dir().join("kaka_lr_import.lrtemplate");
+            let mut list = String::from("\u{feff}"); // BOM
+            for p in &kept {
+                list.push_str(&p.current_path);
+                list.push_str("\r\n");
+            }
+            std::fs::write(&tmp, list)?;
+
+            // Launch LR with each kept path as a command-line import argument,
+            // then wait for its main window to appear (PRD 13.2 超时处理).
+            let mut cmd = std::process::Command::new(&lr_exe);
+            for p in &kept {
+                cmd.arg(&p.current_path);
+            }
+            let child = cmd.spawn()?;
+            let pid = child.id();
+            log::info!("LR 已启动 (pid {pid})，等待主窗口（{LR_START_TIMEOUT:?} 超时）");
+            if wait_for_lr_window(pid, LR_START_TIMEOUT) {
+                Ok(LrLaunchResult::Launched(kept.len()))
+            } else {
+                log::warn!("LR 启动超时（{LR_START_TIMEOUT:?} 无响应），请手动导入 {tmp:?}");
+                Ok(LrLaunchResult::Timeout {
+                    count: kept.len(),
+                    path: tmp,
+                })
+            }
+        })();
+        let _ = tx.send(res.unwrap_or_else(|e| LrLaunchResult::Error(e.to_string())));
+    });
+}
+
+/// Lightroom 启动超时阈值（PRD 13.2：15 秒内无响应 → Toast + 打开临时收藏夹）。
+pub const LR_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Poll up to `timeout` for a top-level visible window owned by `pid`
+/// (LR 已启动并响应). Returns true once a window appears, false on timeout.
+#[cfg(windows)]
+fn wait_for_lr_window(pid: u32, timeout: std::time::Duration) -> bool {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    static TARGET_PID: AtomicU32 = AtomicU32::new(0);
+    static FOUND: AtomicBool = AtomicBool::new(false);
+    TARGET_PID.store(pid, Ordering::SeqCst);
+    FOUND.store(false, Ordering::SeqCst);
+
+    // BOOL = i32 (windows-sys 不导出别名，直接以 i32 表达)。
+    unsafe extern "system" fn find_lr_window(hwnd: HWND, _lparam: isize) -> i32 {
+        let mut win_pid: u32 = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut win_pid) };
+        if win_pid == TARGET_PID.load(Ordering::SeqCst) && unsafe { IsWindowVisible(hwnd) } != 0 {
+            FOUND.store(true, Ordering::SeqCst);
+            return 0; // stop enumeration early
+        }
+        1
     }
 
-    // Write the .lrtemplate placeholder list.
-    let tmp = std::env::temp_dir().join("kaka_lr_import.lrtemplate");
-    let mut list = String::from("\u{feff}"); // BOM
-    for p in &kept {
-        list.push_str(&p.current_path);
-        list.push_str("\r\n");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if FOUND.load(Ordering::SeqCst) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        unsafe { EnumWindows(Some(find_lr_window), 0) };
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    std::fs::write(&tmp, list)?;
+}
 
-    // Launch LR with each kept path as a command-line import argument.
-    let mut cmd = std::process::Command::new(lr_exe);
-    for p in &kept {
-        cmd.arg(&p.current_path);
-    }
-    cmd.spawn()?;
-    Ok(kept.len())
+/// Non-Windows fallback (the app targets Windows only): assume the launch
+/// succeeds so the feature degrades gracefully.
+#[cfg(not(windows))]
+fn wait_for_lr_window(_pid: u32, _timeout: std::time::Duration) -> bool {
+    true
+}
+
+/// Outcome of an asynchronous Lightroom launch (PRD 13.2).
+pub enum LrLaunchResult {
+    /// LR 主窗口在超时前出现，启动成功。
+    Launched(usize),
+    /// 15 秒内无响应：提示用户手动导入临时收藏夹文件。
+    Timeout { count: usize, path: std::path::PathBuf },
+    /// 写文件 / 启动进程失败。
+    Error(String),
 }
 
 #[cfg(test)]

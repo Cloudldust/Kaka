@@ -15,6 +15,11 @@ pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
         db_corruption_dialog(app, ctx);
         return;
     }
+    // 首次启动三步引导（PRD 十六 / UI 6.1.3）：先于其他一切弹窗/恢复流程。
+    if app.show_onboarding {
+        onboarding_dialog(app, ctx);
+        return;
+    }
     if app.confirm.is_some() {
         confirm_dialog(app, ctx);
     }
@@ -63,6 +68,321 @@ pub fn render_dialogs(app: &mut KakaApp, ctx: &egui::Context) {
             });
     }
     render_toasts(app, ctx);
+}
+
+/// 首次启动三步引导（PRD 十六 / UI 6.1.3）：欢迎 → 基础设置 → 选择导入。
+/// 无标题栏向导弹窗：顶部圆点进度 + 右上「跳过引导」，内容区视口高度固定，
+/// 底部动作条（上一步 / 下一步 / 完成）紧随其后固定，永不互相挤出。
+fn onboarding_dialog(app: &mut KakaApp, ctx: &egui::Context) {
+    let mut finish = false;
+    let mut skip = false;
+    dim_backdrop(ctx);
+    // 640 宽确保 Step3 两张 240px 卡片并排放下（560 时会横向溢出让布局换行错乱）。
+    // ScrollArea 视口用显式 max_height 限定：视口 = min(剩余空间, max_height)，
+    // 内容再多也只会滚动，绝不会把底部动作条挤出窗口。
+    egui::Window::new(t("首次启动引导", "Getting started"))
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([640.0, 520.0])
+        .frame(dialog_frame())
+        .show(ctx, |ui| {
+            // 关键：egui 0.36 窗口尺寸 = 内容 min_size（fixed_size 只是初始值）。
+            // 显式把内容最小尺寸钉死，窗口保持 640x520，不被某步内容撑大。
+            ui.set_min_size(egui::vec2(640.0, 520.0));
+            // ---- 顶行（固定）：右上「跳过引导」 ----
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(t("跳过引导", "Skip onboarding"))
+                                    .size(13.0)
+                                    .color(theme::TEXT_WEAK),
+                            )
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        skip = true;
+                    }
+                });
+            });
+
+            // ---- 顶部进度指示（固定）：三个圆点整体水平居中，当前步实心橙、其余空心灰 ----
+            ui.add_space(8.0);
+            const DOT_W: f32 = 12.0;
+            let dots_w = 3.0 * DOT_W + 2.0 * 6.0;
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - dots_w).max(0.0) / 2.0);
+                for i in 0..3 {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(DOT_W, 10.0), egui::Sense::hover());
+                    let c = rect.center();
+                    if i == app.onboard_step {
+                        ui.painter().circle_filled(c, 4.0, theme::ACCENT);
+                    } else {
+                        ui.painter()
+                            .circle_stroke(c, 4.0, egui::Stroke::new(1.5, theme::TEXT_WEAK));
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+            ui.add_space(2.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ---- 内容区：视口高度 = 剩余空间（窗口已由 set_min_size 钉死，
+            // 剩余高度确定），动作条因此始终紧贴窗口底部，内容多时仅滚动 ----
+            let content_h = (ui.available_height() - 40.0).max(80.0);
+            egui::ScrollArea::vertical()
+                .id_salt("onboarding_scroll")
+                .auto_shrink([false, false])
+                .max_height(content_h)
+                .show(ui, |ui| match app.onboard_step {
+                    0 => onboard_step_welcome(ui),
+                    1 => onboard_step_settings(app, ui),
+                    _ => onboard_step_import(app, ui, &mut finish),
+                });
+            ui.add_space(6.0);
+            ui.separator();
+
+            // ---- 底部动作条（固定）：Step1 左下快捷键链接 + 右对齐 完成/下一步/上一步 ----
+            ui.horizontal(|ui| {
+                if app.onboard_step == 0 {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(t("查看快捷键完整列表", "View full shortcut list"))
+                                    .size(13.0)
+                                    .color(theme::TEXT_WEAK),
+                            )
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        app.onboard_show_keys = true;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if app.onboard_step < 2 {
+                        if ui.add(primary_button(t("下一步", "Next"))).clicked() {
+                            app.onboard_step += 1;
+                        }
+                    } else if ui.add(primary_button(t("完成", "Finish"))).clicked() {
+                        finish = true;
+                    }
+                    if app.onboard_step > 0 && ui.button(t("上一步", "Back")).clicked() {
+                        app.onboard_step -= 1;
+                    }
+                });
+            });
+        });
+    if finish {
+        // 「完成」/「稍后手动导入」：仅收尾引导，回到空状态（UI 6.1.3）。
+        app.finish_onboarding();
+    }
+    if skip {
+        app.finish_onboarding();
+        app.toast(
+            ToastKind::Info,
+            t(
+                "已跳过引导。你可以随时点击「导入」开始添加照片。",
+                "Onboarding skipped. Click Import any time to add photos.",
+            ),
+        );
+    }
+    // 快捷键列表弹窗最后绘制，保证盖在引导窗之上。
+    if app.onboard_show_keys {
+        onboarding_shortcuts_window(app, ctx);
+    }
+}
+
+/// Step 1 欢迎：标题 + 4 行要点。
+fn onboard_step_welcome(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new("📷").size(44.0).color(theme::ACCENT));
+        ui.label(
+            RichText::new(t("欢迎使用咔咔", "Welcome to Kaka"))
+                .size(22.0)
+                .strong()
+                .color(theme::TEXT),
+        );
+    });
+    ui.add_space(12.0);
+    let points: &[(&str, &str)] = &[
+        ("只做导入 + 筛选，不做后期。", "Import + culling only — no editing."),
+        ("Q 标记待删 / E 跳过 / Z 放大 / ←→ 切换。", "Q = mark delete / E = skip / Z = zoom / ←→ = navigate."),
+        ("所有照片文件原地不动，仅记录在本地数据库。", "Source files are never touched — Kaka only indexes them."),
+        ("删除照片仅移入回收站，可恢复。", "Deleted photos go to the recycle bin and can be restored."),
+    ];
+    for (zh, en) in points {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("•").color(theme::ACCENT));
+            ui.label(RichText::new(t(zh, en)).size(14.0).color(theme::TEXT_SECONDARY));
+        });
+    }
+}
+
+/// Step 2 基础设置：默认目标目录（复制模式）+ 检测存储卡自动导入开关。
+fn onboard_step_settings(app: &mut KakaApp, ui: &mut egui::Ui) {
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new(t("基础设置", "Basic settings"))
+            .size(18.0)
+            .strong()
+            .color(theme::TEXT),
+    );
+    ui.add_space(12.0);
+    ui.label(
+        RichText::new(t("默认目标目录（复制模式）", "Default target folder (copy mode)"))
+            .size(13.0)
+            .color(theme::TEXT_WEAK),
+    );
+    ui.horizontal(|ui| {
+        let mut path = app.onboard_target_dir.clone();
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut path)
+                .desired_width(380.0)
+                .hint_text(t("从存储卡导入时照片的存放位置", "Where card imports are copied to")),
+        );
+        if resp.changed() {
+            app.onboard_target_dir = path;
+        }
+        if ui.button(t("浏览…", "Browse…")).clicked() {
+            if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                app.onboard_target_dir = p.to_string_lossy().into_owned();
+            }
+        }
+    });
+    ui.add_space(14.0);
+    ui.checkbox(
+        &mut app.onboard_auto_card,
+        t(
+            "检测到存储卡自动弹出导入窗口",
+            "Auto-open the import window when a memory card is detected",
+        ),
+    );
+}
+
+/// Step 3 选择导入：两个大卡片按钮 + 「稍后手动导入」。
+fn onboard_step_import(app: &mut KakaApp, ui: &mut egui::Ui, finish: &mut bool) {
+    ui.add_space(10.0);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(t("选择导入方式", "Choose how to import"))
+                .size(18.0)
+                .strong()
+                .color(theme::TEXT),
+        );
+    });
+    ui.add_space(14.0);
+    // 两个大卡片按钮并排（240x140，边框 #3a3a3a，hover #ffb347）。用 Button 的
+    // 确定 min_size（而非 Frame 内容推断），保证两卡片在 640 窗口内严格并排。
+    let card_btn = |icon: &str, title: &str, desc: &str| -> egui::Button<'static> {
+        egui::Button::new(
+            RichText::new(format!("{icon}\n{title}\n{desc}"))
+                .size(13.0)
+                .color(theme::TEXT),
+        )
+        .min_size(egui::vec2(240.0, 140.0))
+        .fill(egui::Color32::from_rgb(0x24, 0x24, 0x24))
+        .stroke(egui::Stroke::new(1.0, theme::BORDER_2))
+        .corner_radius(0.0)
+    };
+    ui.horizontal(|ui| {
+        let a = card_btn(
+            "💾",
+            t("从存储卡导入", "Import from memory card"),
+            t("推荐新拍摄的照片，将照片复制到电脑", "Copy new photos from your card to the computer"),
+        );
+        if ui.add(a).clicked() {
+            app.onboard_open_import(crate::app::state::ImportMode::Copy);
+            return;
+        }
+        ui.add_space(16.0);
+        let b = card_btn(
+            "📁",
+            t("从硬盘文件夹添加", "Add from a disk folder"),
+            t("仅索引，不移动或复制原文件", "Index only — files are not moved or copied"),
+        );
+        if ui.add(b).clicked() {
+            app.onboard_open_import(crate::app::state::ImportMode::Add);
+            return;
+        }
+    });
+    ui.add_space(10.0);
+    // 「稍后手动导入」→ 直接进入空状态（finish 置位走引导收尾）。
+    ui.vertical_centered(|ui| {
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(t("稍后手动导入", "Import manually later"))
+                        .size(13.0)
+                        .color(theme::TEXT_WEAK),
+                )
+                .frame(false),
+            )
+            .clicked()
+        {
+            *finish = true;
+        }
+    });
+}
+
+/// Step 1 左下「查看快捷键完整列表」：滚动列表弹窗。
+fn onboarding_shortcuts_window(app: &mut KakaApp, ctx: &egui::Context) {
+    egui::Window::new(t("快捷键完整列表", "Keyboard shortcuts"))
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([440.0, 380.0])
+        .frame(dialog_frame())
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t("快捷键完整列表", "Keyboard shortcuts"))
+                        .size(16.0)
+                        .strong()
+                        .color(theme::TEXT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(t("关闭", "Close")).clicked() {
+                        app.onboard_show_keys = false;
+                    }
+                });
+            });
+            ui.separator();
+            ui.add_space(4.0);
+            // 列表视口高度固定（max_height），底部标题/关闭栏不受影响。
+            egui::ScrollArea::vertical()
+                .id_salt("onboarding_keys_scroll")
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    for (code, zh, en) in crate::app::keybinds::ACTIONS {
+                        ui.horizontal(|ui| {
+                            let codes = crate::app::keybinds::effective_codes(
+                                &app.state.config.keybindings,
+                                code,
+                            );
+                            let keys = codes
+                                .iter()
+                                .map(|c| crate::app::keybinds::display(c))
+                                .collect::<Vec<_>>()
+                                .join(" / ");
+                            ui.label(
+                                RichText::new(keys)
+                                    .size(13.0)
+                                    .strong()
+                                    .color(theme::ACCENT),
+                            );
+                            ui.label(RichText::new(t(zh, en)).size(13.0).color(theme::TEXT));
+                        });
+                    }
+                });
+        });
 }
 
 /// Interrupted-import resume prompt (PRD 6.7.1).
@@ -1873,16 +2193,11 @@ fn export_dialog(app: &mut KakaApp, ctx: &egui::Context) {
     }
     if lr_send {
         if let Some(exe) = app.lr_path.clone() {
-            match crate::app::export::send_to_lightroom(&app.state.db, &folder, &exe) {
-                Ok(n) => {
-                    let msg = match i18n::lang() {
-                        i18n::Lang::Zh => format!("已发送 {n} 张保留照片到 Lightroom"),
-                        i18n::Lang::En => format!("Sent {n} kept photos to Lightroom"),
-                    };
-                    app.toast(ToastKind::Success, msg)
-                }
-                Err(e) => app.toast(ToastKind::Error, format!("{}{e}", t("发送到 Lightroom 失败：", "Send to Lightroom failed: "))),
-            }
+            // 后台启动 LR 并等待主窗口（15s 超时，PRD 13.2）；结果经
+            // app.poll_lr() 转成成功 / 超时 Toast（超时带「打开文件夹」按钮）。
+            let (tx, rx) = std::sync::mpsc::channel();
+            crate::app::export::launch_lightroom_async(&folder, &exe, tx);
+            app.lr_rx = Some(rx);
             app.state.show_export = false;
         }
     }
@@ -2802,6 +3117,7 @@ fn render_toasts(app: &mut KakaApp, ctx: &egui::Context) {
     // Newest three; right-click a toast to dismiss it immediately.
     let shown: Vec<usize> = (0..app.toasts.len()).rev().take(3).collect();
     let mut dismiss: Option<usize> = None;
+    let mut action: Option<usize> = None;
     egui::Area::new("toasts".into())
         .anchor(Align2::RIGHT_TOP, [-16.0, 16.0])
         .order(egui::Order::Foreground)
@@ -2823,6 +3139,20 @@ fn render_toasts(app: &mut KakaApp, ctx: &egui::Context) {
                             let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 20.0), egui::Sense::hover());
                             ui.painter().rect_filled(rect, 0.0, bar);
                             ui.label(text);
+                            // 动作按钮（PRD 13.2：超时后「打开文件夹」）。
+                            if let Some(label) = &toast.action_label {
+                                if ui
+                                    .button(
+                                        RichText::new(label)
+                                            .size(13.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0x12, 0x12, 0x12)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(i);
+                                }
+                            }
                         });
                     });
                 let resp = frame
@@ -2834,6 +3164,22 @@ fn render_toasts(app: &mut KakaApp, ctx: &egui::Context) {
                 }
             }
         });
+    if let Some(i) = action {
+        let (label, path) = {
+            let t = &app.toasts[i];
+            (
+                t.action_label.clone().unwrap_or_default(),
+                t.action_path.clone().unwrap_or_default(),
+            )
+        };
+        // 在资源管理器中定位/打开临时收藏夹文件。
+        let _ = std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(&path)
+            .spawn();
+        app.toasts.remove(i);
+        log::info!("Toast 动作「{label}」：已在资源管理器打开 {path}");
+    }
     if let Some(i) = dismiss {
         app.toasts.remove(i);
     }

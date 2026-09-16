@@ -1829,3 +1829,81 @@ fn preload_worker_decodes_cached_preview_and_skips_missing() {
     assert_eq!(done2.photo_id, -2);
     assert!(done2.image.is_none());
 }
+
+// ---- P2-10 拖入图片文件定位：find_by_path 查询（UI 3.3） ----
+
+#[test]
+fn find_by_path_matches_photo_case_insensitively() {
+    let root = temp_root();
+    let db_path = root.join("locate.db");
+    let mut db = Db::open(&db_path).unwrap();
+    db::schema::init(&mut db).unwrap();
+    db::schema::migrate(&mut db).unwrap();
+
+    let file = root.join("DSC_0001.jpg");
+    make_jpeg(&file, [200, 30, 30]);
+    let p = kaka::model::Photo {
+        id: 0,
+        original_filename: "DSC_0001.jpg".into(),
+        file_size: 1234,
+        capture_time: "2026-01-01 10:00:00".into(),
+        current_path: file.to_string_lossy().into_owned(),
+        folder_path: root.to_string_lossy().into_owned(),
+        status: kaka::model::Status::Untreated,
+        thumb_hash: None,
+        decode_failed: false,
+        preview_only: false,
+        rotation_override: 0,
+        exif_orientation: 1,
+        pair_group_id: None,
+        iso: None,
+        aperture: None,
+        shutter_speed: None,
+        aperture_num: None,
+        shutter_num: None,
+        focal_length: None,
+        camera_model: None,
+        lens_model: None,
+        capture_time_source: "exif_original".into(),
+        import_time: "2026-01-01 10:00:00".into(),
+        last_access_time: "2026-01-01 10:00:00".into(),
+        marked_delete_time: None,
+        marked_review_time: None,
+    };
+    let id = db::photos::insert_photo(&db, &p).unwrap().expect("insert");
+    assert_eq!(id, 1);
+
+    // 精确匹配命中。
+    let hit = db::photos::find_by_path(&db, &file.to_string_lossy()).unwrap().expect("found");
+    assert_eq!(hit.id, id);
+    assert_eq!(hit.folder_path, root.to_string_lossy());
+
+    // 大小写不同的路径也能命中（Windows 路径大小写不敏感）。
+    let upper = file.to_string_lossy().to_uppercase();
+    let hit2 = db::photos::find_by_path(&db, &upper).unwrap().expect("case-insensitive hit");
+    assert_eq!(hit2.id, id);
+
+    // 不存在的路径返回 None。
+    assert!(db::photos::find_by_path(&db, "C:/nope/missing.jpg").unwrap().is_none());
+}
+
+// ---- P2-8 首次启动引导：onboarding_done 配置持久化（PRD 十六） ----
+
+#[test]
+fn onboarding_done_flag_roundtrips_through_toml() {
+    let mut cfg = kaka::model::AppConfig::default();
+    assert!(!cfg.onboarding_done, "default must not be done");
+    cfg.onboarding_done = true;
+    cfg.default_target_dir = "D:/photos".into();
+
+    let text = toml::to_string(&cfg).unwrap();
+    let back: kaka::model::AppConfig = toml::from_str(&text).unwrap();
+    assert!(back.onboarding_done);
+    assert_eq!(back.default_target_dir, "D:/photos");
+
+    // 旧版 config.toml（无该字段）解析回默认 false，引导仍会弹出。
+    let old: kaka::model::AppConfig = toml::from_str("language = \"en\"\npair_time_threshold_secs = 7\n").unwrap();
+    assert!(!old.onboarding_done);
+    assert_eq!(old.language, "en");
+    assert_eq!(old.pair_time_threshold_secs, 7);
+}

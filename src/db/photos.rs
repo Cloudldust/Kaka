@@ -140,6 +140,21 @@ pub fn get_photo(db: &Db, id: i64) -> anyhow::Result<Option<Photo>> {
     }
 }
 
+/// Look up a photo by its exact `current_path` (UI 3.3 拖入图片文件定位).
+/// Case-insensitive (COLLATE NOCASE): Windows 路径大小写不敏感，拖入的路径
+/// 与库中记录可能存在大小写差异。
+pub fn find_by_path(db: &Db, path: &str) -> anyhow::Result<Option<PhotoListItem>> {
+    let mut stmt = db
+        .conn
+        .prepare("SELECT * FROM photos WHERE current_path = ?1 COLLATE NOCASE LIMIT 1")?;
+    let mut rows = stmt.query(params![path])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(map_list_item(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Update `current_path` (path repair, PRD 6.4). Returns rows updated.
 pub fn update_path(db: &Db, id: i64, new_path: &str, folder_path: &str) -> anyhow::Result<usize> {
     let n = db.conn.execute(

@@ -330,6 +330,9 @@ pub struct AppConfig {
     pub keybindings: std::collections::HashMap<String, String>,
     /// RAW+JPG 配对时间差阈值（秒，1–30，默认 5，PRD 6.1.3）。
     pub pair_time_threshold_secs: u64,
+    /// 首次启动三步引导（PRD 十六 / UI 6.1.3）是否已完成/跳过。
+    /// 完成后写入 config.toml，下次启动不再弹出。
+    pub onboarding_done: bool,
 }
 
 /// Parse a normalized capture time ("YYYY-MM-DD HH:MM:SS") into a Unix epoch
@@ -369,6 +372,7 @@ impl Default for AppConfig {
             language: "zh".to_string(),
             keybindings: std::collections::HashMap::new(),
             pair_time_threshold_secs: 5,
+            onboarding_done: false,
         }
     }
 }

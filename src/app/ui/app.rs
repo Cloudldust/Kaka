@@ -62,6 +62,10 @@ pub struct Toast {
     pub text: String,
     pub created: std::time::Instant,
     pub ttl_secs: f64,
+    /// Optional action button (e.g. 「打开文件夹」): label + a path to reveal
+    /// in Explorer (`explorer /select,<path>`).
+    pub action_label: Option<String>,
+    pub action_path: Option<String>,
 }
 
 /// Startup diagnostics gathered before the UI loop.
@@ -93,6 +97,9 @@ pub struct KakaApp {
     pub export_org: crate::app::copy::OrgMode,
     /// Detected Lightroom Classic exe path (optional feature, PRD 13).
     pub lr_path: Option<std::path::PathBuf>,
+    /// 发送到 LR（PRD 13.2）：后台线程启动 LR 并等待其主窗口出现（15s 超时），
+    /// 结果经此通道回传 UI（成功 Toast / 超时 Toast + 打开临时收藏夹文件）。
+    pub lr_rx: Option<Receiver<crate::app::export::LrLaunchResult>>,
     /// 清空存储卡 (PRD 6.7): move successfully-copied source files on the
     /// removable card to the recycle bin after a fully-successful import.
     pub import_clear_card: bool,
@@ -187,6 +194,17 @@ pub struct KakaApp {
     pub search_pending: Option<(String, std::time::Instant)>,
     // @ 自动补全：搜索框当前屏幕矩形（候选窗口在面板渲染完后绘制，避免被遮挡）。
     pub search_suggest_rect: Option<egui::Rect>,
+
+    // 首次启动三步引导（PRD 十六 / UI 6.1.3）：空白库 + 未完成引导时弹出。
+    pub show_onboarding: bool,
+    /// 引导当前步骤 0..3（0=欢迎，1=基础设置，2=选择导入）。
+    pub onboard_step: usize,
+    /// Step 2 草稿：默认目标目录（复制模式）。
+    pub onboard_target_dir: String,
+    /// Step 2 草稿：检测存储卡自动弹出导入窗口。
+    pub onboard_auto_card: bool,
+    /// Step 1「查看快捷键完整列表」小弹窗开关。
+    pub onboard_show_keys: bool,
 
     pub startup: StartupInfo,
 
@@ -316,6 +334,10 @@ impl KakaApp {
         theme::apply_style(&cc.egui_ctx);
 
         let settings_draft = cfg.clone();
+        // 首次启动三步引导（PRD 十六 / UI 6.1.3）：空白库 + 尚未完成/跳过引导。
+        let show_onboarding = startup.first_run && !settings_draft.onboarding_done;
+        let onboard_target_dir = settings_draft.default_target_dir.clone();
+        let onboard_auto_card = settings_draft.auto_detect_card;
         let state = AppState::new(db, cfg);
 
         let pending_crash = if was_crash {
@@ -340,6 +362,7 @@ impl KakaApp {
             export_target: String::new(),
             export_org: crate::app::copy::OrgMode::Structure,
             lr_path: None,
+            lr_rx: None,
             import_clear_card: false,
             import_scan_files: Vec::new(),
             import_scan_selected: std::collections::HashSet::new(),
@@ -384,6 +407,11 @@ impl KakaApp {
             filter_completed_toasted: false,
             search_pending: None,
             search_suggest_rect: None,
+            show_onboarding,
+            onboard_step: 0,
+            onboard_target_dir,
+            onboard_auto_card,
+            onboard_show_keys: false,
             startup,
             confirm: None,
             delete_sel: std::collections::HashSet::new(),
@@ -416,11 +444,15 @@ impl KakaApp {
             export_copy_result: None,
         };
         if app.startup.first_run {
-            app.toast(
-                ToastKind::Info,
-                t("欢迎使用咔咔！只做导入+筛选。点击「导入」开始添加照片。",
-                  "Welcome to Kaka! Import + cull only. Click Import to add your first photos."),
-            );
+            // 三步引导接管首次欢迎（PRD 十六）；仅当引导被配置标记为已完成而库
+            // 仍为空（异常态）时退回老式欢迎 Toast。
+            if !app.show_onboarding {
+                app.toast(
+                    ToastKind::Info,
+                    t("欢迎使用咔咔！只做导入+筛选。点击「导入」开始添加照片。",
+                      "Welcome to Kaka! Import + cull only. Click Import to add your first photos."),
+                );
+            }
         }
         if app.startup.corruption_detected {
             app.state.show_db_corruption = true;
@@ -579,6 +611,30 @@ impl KakaApp {
             text: text.into(),
             created: std::time::Instant::now(),
             ttl_secs: ttl,
+            action_label: None,
+            action_path: None,
+        });
+        if self.toasts.len() > 6 {
+            self.toasts.remove(0);
+        }
+    }
+
+    /// Push a toast with an action button (e.g. 打开文件夹). Kept alive longer
+    /// than a plain toast so the user has time to read the path and act.
+    pub fn toast_action(
+        &mut self,
+        kind: ToastKind,
+        text: impl Into<String>,
+        label: impl Into<String>,
+        path: impl Into<String>,
+    ) {
+        self.toasts.push(Toast {
+            kind,
+            text: text.into(),
+            created: std::time::Instant::now(),
+            ttl_secs: 30.0,
+            action_label: Some(label.into()),
+            action_path: Some(path.into()),
         });
         if self.toasts.len() > 6 {
             self.toasts.remove(0);
@@ -762,6 +818,7 @@ impl KakaApp {
             || self.state.show_filter
             || self.state.show_db_corruption
             || self.path_edit_active
+            || self.show_onboarding
             || self.confirm.is_some();
 
         // Esc chain: cancel digit jump → close dialog → exit fullscreen →
@@ -1475,15 +1532,149 @@ impl KakaApp {
         });
     }
 
-    /// Handle a folder dropped onto the window → add-mode import (UI spec 3.3).
+    /// Handle a folder or photo files dropped onto the window (UI spec 3.3).
+    /// - 目录 → add-mode 导入对话框。
+    /// - 单/多张图片文件 → 若同属一个 folder_path 则切换工作区并定位第一张。
     fn handle_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        for f in dropped {
-            let p = f.path().to_path_buf();
-            if p.is_dir() {
-                self.import_path = p.to_string_lossy().into_owned();
-                self.state.show_import = true;
+        if dropped.is_empty() {
+            return;
+        }
+        // 弹窗/引导打开时不响应拖放，避免打断进行中的对话框。
+        if self.state.show_import
+            || self.state.show_settings
+            || self.state.show_export
+            || self.state.show_filter
+            || self.state.show_delete_box
+            || self.state.show_crash_recovery
+            || self.state.show_db_corruption
+            || self.show_onboarding
+            || self.confirm.is_some()
+        {
+            return;
+        }
+        let dirs: Vec<_> = dropped.iter().filter(|f| f.path().is_dir()).collect();
+        let files: Vec<_> = dropped.iter().filter(|f| !f.path().is_dir()).collect();
+        if let Some(f) = dirs.first() {
+            self.import_path = f.path().to_string_lossy().into_owned();
+            self.state.show_import = true;
+            return;
+        }
+        if files.is_empty() {
+            return;
+        }
+        let paths: Vec<std::path::PathBuf> = files.iter().map(|f| f.path().to_path_buf()).collect();
+        self.handle_dropped_files(&paths);
+    }
+
+    /// UI 3.3: 拖入单/多张图片文件 → 若同属一个 folder_path 则切换工作区到该
+    /// 文件夹并自动定位到第一张拖入的照片。不支持 / 不在图库的文件给 Toast。
+    fn handle_dropped_files(&mut self, paths: &[std::path::PathBuf]) {
+        use crate::io::format::{classify, Classification};
+
+        // 1. 后缀白名单：全部必须是受支持的照片格式（PRD 2.1 列表）。
+        let mut photos: Vec<std::path::PathBuf> = Vec::new();
+        for p in paths {
+            if !matches!(classify(p), Classification::Photo(_)) {
+                self.toast(
+                    ToastKind::Warning,
+                    format!(
+                        "{}{}",
+                        t("不支持的格式：", "Unsupported format: "),
+                        p.to_string_lossy()
+                    ),
+                );
+                return;
             }
+            photos.push(p.clone());
+        }
+
+        // 2. 查库：文件必须在图库中（按 current_path 精确匹配）。
+        let mut found: Vec<(String, String, i64, Option<i64>)> = Vec::new();
+        let mut missing = 0usize;
+        for p in &photos {
+            let ps = p.to_string_lossy().into_owned();
+            match db::photos::find_by_path(&self.state.db, &ps) {
+                Ok(Some(item)) => {
+                    found.push((ps, item.folder_path, item.id, item.pair_group_id));
+                }
+                _ => missing += 1,
+            }
+        }
+        if found.is_empty() {
+            self.toast(
+                ToastKind::Info,
+                t(
+                    "拖入的照片不在图库中，请先导入",
+                    "The dropped photos are not in the library — import them first",
+                ),
+            );
+            return;
+        }
+
+        // 3. 同属一个 folder_path 才切换工作区（UI 3.3）。
+        let folders: std::collections::HashSet<&str> = found.iter().map(|f| f.1.as_str()).collect();
+        if folders.len() > 1 {
+            self.toast(
+                ToastKind::Info,
+                t(
+                    "拖入的照片来自多个文件夹，无法定位",
+                    "Dropped photos span multiple folders — cannot locate them",
+                ),
+            );
+            return;
+        }
+        let folder = found[0].1.clone();
+        if !std::path::Path::new(&folder).is_dir() {
+            self.toast(
+                ToastKind::Warning,
+                t("文件夹不存在：", "Folder does not exist: ").to_string() + &folder,
+            );
+            return;
+        }
+        let first_path = found[0].0.clone();
+        let sort = self.state.ws.sort;
+        // 清空搜索/过滤，保证被定位的照片一定在当前视图中可见。
+        self.state.ws.search = String::new();
+        self.state.ws.filter = crate::model::Filter::default();
+        if self.state.open_workspace(&folder, sort).is_ok() {
+            // 定位第一张拖入的照片；若它是 RAW+JPG 配对中被合并掉的 JPG 成员，
+            // 按其 pair_group_id 定位配对代表。
+            let first = found.iter().find(|f| f.0 == first_path).unwrap_or(&found[0]);
+            let mut pos = self
+                .state
+                .ws
+                .items
+                .iter()
+                .position(|p| p.id == first.2);
+            if pos.is_none() {
+                if let Some(g) = first.3 {
+                    pos = self
+                        .state
+                        .ws
+                        .items
+                        .iter()
+                        .position(|p| p.pair_group_id == Some(g));
+                }
+            }
+            if let Some(pos) = pos {
+                self.state.ws.current_index = pos;
+            }
+            self.needs_save = true;
+            self.last_centered_id = None;
+            let note = if missing > 0 {
+                match i18n::lang() {
+                    i18n::Lang::Zh => format!("（{} 张不在图库中已忽略）", missing),
+                    i18n::Lang::En => format!(" ({} file(s) not in the library, ignored)", missing),
+                }
+            } else {
+                String::new()
+            };
+            let msg = match i18n::lang() {
+                i18n::Lang::Zh => format!("已定位到拖入的照片，共 {} 张{note}", found.len()),
+                i18n::Lang::En => format!("Located {} dropped photo(s){note}", found.len()),
+            };
+            self.toast(ToastKind::Success, msg);
         }
     }
 
@@ -1502,6 +1693,7 @@ impl KakaApp {
                 || self.state.show_crash_recovery
                 || self.state.show_db_corruption
                 || self.show_resume
+                || self.show_onboarding
             {
                 continue;
             }
@@ -1555,6 +1747,79 @@ impl KakaApp {
         self.state.show_crash_recovery = false;
         self.save_workspace();
         self.toast(ToastKind::Success, "工作区已恢复");
+    }
+
+    // ---- 首次启动三步引导（PRD 十六 / UI 6.1.3） ----
+
+    /// 引导完成 / 被跳过：把 Step 2 的设置写入配置并持久化，下次启动不再弹出。
+    pub fn finish_onboarding(&mut self) {
+        self.state.config.onboarding_done = true;
+        self.state.config.default_target_dir = self.onboard_target_dir.trim().to_string();
+        self.state.config.auto_detect_card = self.onboard_auto_card;
+        if let Err(e) = config::save(&self.state.config) {
+            log::error!("保存引导设置失败: {e}");
+        }
+        self.show_onboarding = false;
+        self.onboard_show_keys = false;
+        self.startup.first_run = false;
+    }
+
+    /// 引导 Step 3 直接进入对应模式的导入窗口（从存储卡 / 从硬盘文件夹）。
+    pub fn onboard_open_import(&mut self, mode: crate::app::state::ImportMode) {
+        self.finish_onboarding();
+        self.import_mode = mode;
+        if mode == crate::app::state::ImportMode::Copy {
+            self.import_target = self.state.config.default_target_dir.clone();
+        }
+        self.state.show_import = true;
+    }
+
+    // ---- Lightroom 联动（PRD 13.2：15s 启动超时） ----
+
+    /// 把后台 LR 启动结果（成功 / 超时 / 失败）fold 成 Toast。超时 Toast 带
+    /// 「打开文件夹」按钮（在 render_toasts 中消费）。
+    fn poll_lr(&mut self) {
+        let Some(rx) = self.lr_rx.take() else { return; };
+        let mut result = None;
+        while let Ok(r) = rx.try_recv() {
+            result = Some(r);
+        }
+        self.lr_rx = Some(rx);
+        use crate::app::export::LrLaunchResult;
+        let Some(res) = result else { return };
+        match res {
+            LrLaunchResult::Launched(n) => {
+                let msg = match i18n::lang() {
+                    i18n::Lang::Zh => format!("已发送 {n} 张保留照片到 Lightroom"),
+                    i18n::Lang::En => format!("Sent {n} kept photos to Lightroom"),
+                };
+                self.toast(ToastKind::Success, msg);
+            }
+            LrLaunchResult::Timeout { count, path } => {
+                let path = path.to_string_lossy().into_owned();
+                let msg = match i18n::lang() {
+                    i18n::Lang::Zh => format!(
+                        "Lightroom 启动超时（15 秒无响应），请手动导入临时收藏夹文件：{path}",
+                    ),
+                    i18n::Lang::En => format!(
+                        "Lightroom did not respond within 15s. Please import the temporary collection file manually: {path}",
+                    ),
+                };
+                self.toast_action(
+                    ToastKind::Warning,
+                    msg,
+                    t("打开文件夹", "Open folder"),
+                    path.clone(),
+                );
+                if count > 0 {
+                    log::warn!("LR 启动超时，{count} 张保留照片未自动导入: {path}");
+                }
+            }
+            LrLaunchResult::Error(e) => self.toast(
+                ToastKind::Error,
+                format!("{}{e}", t("发送到 Lightroom 失败：", "Send to Lightroom failed: ")),
+            ),
+        }
     }
 
     // ---- 数据库维护（PRD 10.6 三按钮弹窗 / UI 5.3.4 设置-数据库） ----
@@ -2236,6 +2501,7 @@ impl eframe::App for KakaApp {
         self.handle_drops(&ctx);
         self.handle_card();
         self.poll_import();
+        self.poll_lr();
         self.poll_zoom(&ctx);
         self.poll_cache_clean();
         self.poll_cache_migrate();
