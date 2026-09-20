@@ -299,6 +299,10 @@ impl HistogramMode {
     }
 }
 
+/// 官方仓库地址：设置 → 关于「打开 GitHub 仓库」按钮的目标。
+/// 老版本 config.toml 中可能残留占位地址，由 `config::migrate_legacy_repo` 迁移。
+pub const DEFAULT_REPO_URL: &str = "https://github.com/Cloudldust/Kaka";
+
 /// Settings persisted to %APPDATA%/Kaka/config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -352,7 +356,7 @@ impl Default for AppConfig {
             .to_string_lossy()
             .into_owned();
         AppConfig {
-            github_repo: "https://github.com/kaka-rs/kaka".to_string(),
+            github_repo: DEFAULT_REPO_URL.to_string(),
             auto_detect_card: true,
             auto_open_last_workspace: true,
             show_clipping_warning: true,
